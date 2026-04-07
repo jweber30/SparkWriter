@@ -27,3 +27,8 @@ debian/*.debhelper.log
 debian/*.substvars
 debian/*.postinst.debhelper
 debian/*.prerm.debhelper
+
+
+*.txt
+*.md
+*.json

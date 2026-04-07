@@ -46,24 +46,6 @@ class SparkApplication(Adw.Application):
     def handle_uri(self, uri):
         print(f"Handling URI: {uri}")
         
-        # Check for plugin install first (handled by App)
-        if "plugin/install" in uri:
-            import urllib.parse
-            parsed = urllib.parse.urlparse(uri)
-            query = urllib.parse.parse_qs(parsed.query)
-            try:
-                # Support both ?name= (local copy) and ?url= (download)
-                plugin_url = query.get('url', [None])[0]
-                plugin_name = query.get('name', [None])[0]
-                
-                if plugin_url:
-                    self.install_plugin_from_url(plugin_url)
-                elif plugin_name:
-                    self.install_plugin(plugin_name)
-            except Exception as e:
-                print(f"Failed to parse URI: {e}")
-            return
-        
         # Check for JSON plugin addition (new handler)
         if "plugin/add" in uri:
             import urllib.parse
@@ -84,68 +66,7 @@ class SparkApplication(Adw.Application):
         else:
             self._pending_uri = uri
 
-    def install_plugin(self, name):
-        """Install plugin by copying from available/ to installed/."""
-        print(f"Installing plugin: {name}")
-        
-        src_dir = os.path.join(os.path.dirname(__file__), "plugins", "available")
-        dst_dir = os.path.join(os.path.dirname(__file__), "plugins", "installed")
-        
-        src_file = os.path.join(src_dir, f"{name}.py")
-        dst_file = os.path.join(dst_dir, f"{name}.py")
-        
-        if os.path.exists(src_file):
-            shutil.copy(src_file, dst_file)
-            print(f"Plugin {name} installed to {dst_file}")
-            
-            # Reload plugins if window is active
-            win = self.props.active_window
-            if win:
-                GLib.idle_add(win.reload_plugins)
-        else:
-            print(f"Plugin {name} not found in available plugins.")
-    
-    def install_plugin_from_url(self, url):
-        """Download and install plugin from a remote URL."""
-        import urllib.request
-        import urllib.parse
-        import tempfile
-        from pathlib import Path
-        
-        print(f"Downloading plugin from: {url}")
-        
-        try:
-            # Determine filename from URL
-            parsed = urllib.parse.urlparse(url)
-            filename = Path(parsed.path).name
-            
-            if not filename.endswith('.py'):
-                print(f"Error: URL must point to a .py file, got: {filename}")
-                return
-            
-            # Download to temp file first
-            with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.py') as tmp:
-                tmp_path = tmp.name
-                with urllib.request.urlopen(url, timeout=30) as response:
-                    tmp.write(response.read())
-            
-            # Move to installed plugins directory
-            dst_dir = os.path.join(os.path.dirname(__file__), "plugins", "installed")
-            os.makedirs(dst_dir, exist_ok=True)
-            
-            dst_file = os.path.join(dst_dir, filename)
-            shutil.move(tmp_path, dst_file)
-            print(f"Plugin installed to {dst_file}")
-            
-            # Reload plugins if window is active
-            win = self.props.active_window
-            if win:
-                GLib.idle_add(win.reload_plugins, f"Installed {filename}")
-                
-        except Exception as e:
-            print(f"Failed to install plugin from URL: {e}")
-            import traceback
-            traceback.print_exc()
+
 
     def add_json_plugin(self, url: str):
         """Add a JSON-based SparkPlug from a manifest URL.

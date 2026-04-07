@@ -86,7 +86,7 @@ class PluginManager:
                     self._prepare_plugin(plugin)
                     self.plugins.append(plugin)
                     
-                    # Same enable/disable logic as Python plugins
+                    # Apply enable/disable logic: auto-enable if installed or in auto_enable list
                     self.disabled_plugins.add(plugin.name)
                     if self._auto_enable.get(plugin.name) or is_installed:
                         self.disabled_plugins.discard(plugin.name)

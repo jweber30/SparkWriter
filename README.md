@@ -1,16 +1,42 @@
-# SparkGTK
+# SparkWriter
 
-A native GTK4/LibAdwaita frontend for Spark Writer, designed to be modular and lightweight.
+A native GTK4/LibAdwaita application designed to be modular and lightweight.
+
+## Document Status And Provenance
+
+This README is the practical usage guide and may include behavior that is still evolving.
+
+- Treat the JSON schema and current test suite as the strongest current contract.
+- Treat policy sections here as current implementation notes unless they are explicitly marked stable.
+- Track evolving design decisions and rationale in `docs/DECISIONS.md`.
+
+If a README statement conflicts with code/tests, prefer code/tests and open a docs follow-up.
 
 ## Features
 
-- **Native UI**: Uses GTK4 and LibAdwaita for a modern Linux desktop experience.
-- **SparkPlug System**: Modular architecture for extending functionality (JSON SparkPlug manifests).
-- **Core Logic**: Bundles `usb_writer_core` — the USB writing and notification library lives inside Spark Writer's own source tree.
+
+## What Is SparkWriter?
+
+SparkWriter is a **modular USB provisioning tool** for bare-metal infrastructure. It:
+
+1. Loads JSON "SparkPlug" manifests that define presets (ISOs) and automation workflows
+2. Generates dynamic forms based on manifest `config_fields` to collect user input
+3. Renders templates using the collected data
+4. Executes lifecycle actions (before/after write)
+5. Writes ISOs to removable devices using `dd` (with Crostini support)
+
+**In one sentence:** A fancy wrapper around `dd` that lets you define provisioning workflows in JSON.
+
+**Use cases:**
+
+- Bare-metal cluster provisioning (define via manifest, share via URL)
+- Cloud-init image delivery with custom configs
+- Automated hardware imaging pipelines
+- Chrome OS Crostini-friendly USB creation
 
 ## SparkPlug Guide (JSON Manifests)
 
-Python-file SparkPlugs are being deprecated. External SparkPlug authors should create JSON manifests.
+SparkPlugs are installed as JSON manifests distributed via HTTPS URLs. External authors should follow the manifest specification below.
 
 ### Publisher Quickstart (2 Minutes)
 
@@ -30,16 +56,52 @@ Python-file SparkPlugs are being deprecated. External SparkPlug authors should c
 
 Current publishing recommendation:
 
-- Publish plain manifests.
-- Do not include `secure_manifest` or `signature`; these fields are deprecated and rejected.
+
+## URI Handler & Chromebook Integration
+
+SparkWriter registers as the handler for `spark://` URIs at the system level.
+
+### How It Works
+
+When a user clicks a `spark://plugin/add?manifest=...` link in their browser:
+
+1. The browser recognizes the `spark://` scheme (registered by the `.desktop` file)
+2. The system launches SparkWriter with the full URI as an argument
+3. SparkWriter parses the URI, evaluates trust, and prompts the user before downloading
+4. The manifest is downloaded, validated, and installed locally
+
+This works on:
+- Desktop Linux (GTK4 environments)
+- Chrome OS (Crostini Linux container with proper Wayland/X11 support)
+- Any distro with FreeDesktop.org application support
+
+### For Users: Clickable Links
+
+Share plugin manifests with users as direct links. They don't need to copy-paste—just click:
+
+```html
+<!-- Example: embed in a website -->
+<a href="spark://plugin/add?manifest=https://example.com/my-plugin.json">
+    Install My SparkWriter Plugin
+</a>
+```
+
+### For Developers: Adding URI Handlers
+
+The URI handler is registered via the `.desktop` file:
+
+```ini
+# spark-writer.desktop
+MimeType=x-scheme-handler/spark;
+Exec=/usr/bin/spark-writer %u
+```
+
+The `%u` placeholder receives the full URI. SparkWriter's `app.py` intercepts this in `do_command_line()`, parses the manifest query parameter, and routes to `handle_uri()` which implements trust evaluation before download.
+
+See the Installation Paths section below for where downloaded manifests are stored.
 
 This guide covers:
 
-- Required manifest structure
-- Available fields and lifecycle hooks
-- Installation and trust behavior
-- Dependency approvals and command safety
-- A working minimal example
 
 ### 1. Quick Start
 
@@ -333,16 +395,6 @@ Before publishing:
 6. Confirm plugin appears in UI and presets load.
 7. Run a full write flow and verify hook behavior.
 
-### 12. Migration Notes (From Python SparkPlugs)
-
-- Move plugin identity to `metadata`.
-- Move preset registration logic to `presets`/`preset_feeds`.
-- Replace imperative code with declarative `actions` pipelines.
-- Declare all external binaries under `requires.commands`.
-- Use templates and `output_var` values instead of ad-hoc Python state.
-
-For future compatibility, new external SparkPlugs should be JSON-only.
-
 ## Development
 
 1.  Install dependencies:
@@ -353,3 +405,106 @@ For future compatibility, new external SparkPlugs should be JSON-only.
     ```bash
     spark-writer
     ```
+
+### Project Architecture
+
+**Layers:**
+
+| Layer | Component | Purpose |
+|-------|-----------|---------|
+| UI | `src/spark_writer/` (GTK4/Adwaita) | Plugin discovery, form generation, download progress, device selection |
+| Plugin Runtime | `src/spark_writer/plugins/` | `JsonSparkPlug` execution, template rendering, action lifecycle |
+| Core Writers | `src/usb_writer_core/` | Low-level disk operations, Crostini support, notifications, session receipts |
+| CLI/IPC | System `.desktop` file | URI handler registration, app activation, CLI argument parsing |
+
+**Data Flow:**
+
+```
+User clicks spark://plugin/add?manifest=URL
+    ↓
+.desktop file + app.py do_command_line()
+    ↓
+handle_uri() → evaluate_trust() → show confirmation
+    ↓
+Download manifest JSON
+    ↓
+JsonSparkPlug loads manifest
+    ↓
+ConfigFormBuilder renders config_fields as Adwaita widgets
+    ↓
+User fills form + selects preset/device
+    ↓
+on_iso_ready actions (if any) + on_write_complete actions
+    ↓
+usb_writer_core.writer uses dd, wipefs, mount via subprocess
+```
+
+### System Dependencies
+
+SparkWriter requires system packages (not pip):
+
+- `libgtk-4-1` (GTK4 runtime)
+- `libadwaita-1-0` (Adwaita widgets)
+- `libtorrent-rasterbar-dev` (torrent/magnet downloads)
+- `util-linux` (lsblk, wipefs, mount)
+- `python3-gi` (PyGObject bindings)
+
+On Ubuntu 24.04:
+
+```bash
+sudo apt install libgtk-4-1 libadwaita-1-0 libtorrent-rasterbar-dev \
+    util-linux python3-gi python3-gi-cairo python3-dev
+```
+
+Then install SparkWriter in development mode:
+
+```bash
+pip install -e .
+```
+
+### Testing URI Handlers Locally
+
+1. Install the package: `pip install -e .`
+2. Register the `.desktop` file manually (normally done by .deb):
+     ```bash
+     mkdir -p ~/.local/share/applications
+     cp spark-writer.desktop ~/.local/share/applications/net.metalstrapper.SparkGTK.desktop
+     update-desktop-database ~/.local/share/applications
+     ```
+3. Test by running:
+     ```bash
+     spark-writer "spark://plugin/add?manifest=file:///path/to/my-plugin.json"
+     ```
+4. For browser integration, the `.desktop` file must be in `/usr/share/applications/` (installed via .deb)
+
+### Testing Plugins Locally
+
+Drop a JSON manifest into `~/.local/share/spark-writer/plugins/` and restart the app:
+
+```bash
+mkdir -p ~/.local/share/spark-writer/plugins/
+cp my-plugin.json ~/.local/share/spark-writer/plugins/
+spark-writer
+```
+
+Or use the manifest approval file to pre-approve commands:
+
+```bash
+# ~/.local/share/spark-writer/plugins/.my-plugin-id.approval
+{
+    "commands": ["mkpasswd"]
+}
+```
+
+### Running Tests
+
+```bash
+pytest tests/
+```
+
+Key test modules:
+
+- `test_manifest_integration.py`: End-to-end JSON plugin loading and action execution
+- `test_manifest_approval.py`: Command approval flow and security policies
+- `test_writer_subprocess.py`: USB write subprocess and Crostini integration
+- `test_notifications.py`: Desktop notifications and PipelineNotifier events
