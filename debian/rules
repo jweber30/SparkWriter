@@ -1,0 +1,21 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@ --with python3 --buildsystem=pybuild
+
+override_dh_auto_install:
+	dh_auto_install
+	# Install desktop file with application ID as filename for proper Chrome OS integration
+	mkdir -p debian/spark-writer/usr/share/applications
+	cp spark-writer.desktop debian/spark-writer/usr/share/applications/net.metalstrapper.SparkGTK.desktop
+	# Install icons (pre-generated at multiple sizes)
+	mkdir -p debian/spark-writer/usr/share/pixmaps
+	install -m 0644 icons/512x512/spark-writer.png debian/spark-writer/usr/share/pixmaps/spark-writer.png
+	mkdir -p debian/spark-writer/usr/share/icons/hicolor/512x512/apps
+	install -m 0644 icons/512x512/spark-writer.png debian/spark-writer/usr/share/icons/hicolor/512x512/apps/spark-writer.png
+	mkdir -p debian/spark-writer/usr/share/icons/hicolor/256x256/apps
+	install -m 0644 icons/256x256/spark-writer.png debian/spark-writer/usr/share/icons/hicolor/256x256/apps/spark-writer.png
+	mkdir -p debian/spark-writer/usr/share/icons/hicolor/128x128/apps
+	install -m 0644 icons/128x128/spark-writer.png debian/spark-writer/usr/share/icons/hicolor/128x128/apps/spark-writer.png
+	mkdir -p debian/spark-writer/usr/share/icons/hicolor/48x48/apps
+	install -m 0644 icons/48x48/spark-writer.png debian/spark-writer/usr/share/icons/hicolor/48x48/apps/spark-writer.png

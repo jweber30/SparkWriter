@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Spark Writer
+Exec=/usr/bin/spark-writer %u
+GenericName=USB Provisioning Tool
+Type=Application
+Icon=spark-writer
+MimeType=x-scheme-handler/spark;
+Comment=Spark bare-metal infrastructure with extendable USB creation
+Terminal=false
+Categories=Utility;System;
+Keywords=usb;disk;image;iso;provisioning;cloud-init;chromeos;crostini;metalstrapper;spark;
+StartupNotify=true
+StartupWMClass=net.metalstrapper.SparkGTK

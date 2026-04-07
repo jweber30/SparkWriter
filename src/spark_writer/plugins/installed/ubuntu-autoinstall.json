@@ -1,0 +1,205 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "id": "ubuntu-autoinstall",
+    "name": "Ubuntu Autoinstall",
+    "version": "1.0.0",
+    "author": "MetalStrapper",
+    "description": "Ubuntu Server autoinstall with cloud-init. Generates ephemeral password shown only once after write completes."
+  },
+  "requires": {
+    "commands": [
+      {
+        "name": "mkpasswd",
+        "description": "Generate password hashes for autoinstall workflows",
+        "allow_plugin_specific": true
+      }
+    ]
+  },
+  "presets": [
+    {
+      "id": "ubuntu-24.04-server",
+      "name": "Ubuntu 24.04 LTS Server",
+      "url": "https://releases.ubuntu.com/noble/ubuntu-24.04.3-live-server-amd64.iso.torrent",
+      "sha256": "",
+      "distro": "ubuntu"
+    },
+    {
+      "id": "ubuntu-22.04-server",
+      "name": "Ubuntu 22.04 LTS Server",
+      "url": "https://releases.ubuntu.com/jammy/ubuntu-22.04.5-live-server-amd64.iso.torrent",
+      "sha256": "",
+      "distro": "ubuntu"
+    }
+  ],
+  "config_fields": [
+    {
+      "id": "hostname",
+      "label": "Hostname",
+      "type": "text",
+      "placeholder": "ubuntu-server",
+      "description": "System hostname",
+      "required": true
+    },
+    {
+      "id": "username",
+      "label": "Admin Username",
+      "type": "text",
+      "default": "ubuntu",
+      "description": "Initial admin user (will have sudo access)",
+      "required": true
+    },
+    {
+      "id": "ssh-keys",
+      "label": "SSH Public Keys",
+      "type": "multiline",
+      "description": "One public key per line (ssh-rsa, ssh-ed25519, etc.)",
+      "required": true,
+      "big": true
+    },
+    {
+      "id": "timezone",
+      "label": "Timezone",
+      "type": "text",
+      "default": "America/Denver",
+      "description": "System timezone (e.g., America/New_York)"
+    },
+    {
+      "id": "packages",
+      "label": "Additional Packages (optional)",
+      "type": "text",
+      "placeholder": "vim git htop",
+      "description": "Space-separated package names to install"
+    }
+  ],
+  "templates": {
+    "user_data": "#cloud-config\nautoinstall:\n  version: 1\n  identity:\n    hostname: {{hostname}}\n    username: {{username}}\n    password: {{_generated_password_hash}}\n  user-data:\n    hostname: {{hostname}}\n    fqdn: {{hostname}}.local\n    timezone: {{timezone}}\n    users:\n      - name: {{username}}\n        groups: [sudo, docker]\n        shell: /bin/bash\n        sudo: 'ALL=(ALL) NOPASSWD:ALL'\n        passwd: {{_generated_password_hash}}\n        lock_passwd: false\n        ssh_authorized_keys:\n{{_ssh_keys_yaml}}\n    package_update: true\n    package_upgrade: true\n    packages:\n{{_packages_yaml}}\n    final_message: \"Ubuntu autoinstall complete. Hostname: {{hostname}}\"\n",
+    "meta_data": "instance-id: ubuntu-autoinstall-{{hostname}}\nlocal-hostname: {{hostname}}\n",
+    "grub_patch_pattern": "(linux\\s+/casper/vmlinuz)\\s+(---)",
+    "grub_patch_replacement": "\\1 autoinstall \"ds=nocloud;s=/cdrom/nocloud/\" \\2"
+  },
+  "actions": {
+    "on_iso_ready": [
+      {
+        "id": "generate_password",
+        "type": "generate_ephemeral_password",
+        "length": 16,
+        "output_var": "_generated_password_plaintext",
+        "emit_event": {
+          "message": "Generating secure ephemeral password",
+          "progress": 10
+        }
+      },
+      {
+        "id": "hash_password",
+        "type": "run_command",
+        "command": [
+          "mkpasswd",
+          "--method=yescrypt",
+          "{{_generated_password_plaintext}}"
+        ],
+        "output_var": "_generated_password_hash",
+        "emit_event": {
+          "message": "Hashing password",
+          "progress": 20
+        }
+      },
+      {
+        "id": "format_ssh_keys",
+        "type": "format_yaml_list",
+        "input": "{{ssh-keys}}",
+        "indent": 10,
+        "output_var": "_ssh_keys_yaml",
+        "emit_event": {
+          "message": "Formatting SSH keys",
+          "progress": 30
+        }
+      },
+      {
+        "id": "format_packages",
+        "type": "format_yaml_list",
+        "input": "{{packages}}",
+        "default": "curl wget vim git htop",
+        "indent": 6,
+        "output_var": "_packages_yaml",
+        "emit_event": {
+          "message": "Preparing package list",
+          "progress": 40
+        }
+      },
+      {
+        "id": "render_user_data",
+        "type": "render_template",
+        "template": "user_data",
+        "output_var": "user_data_content",
+        "emit_event": {
+          "message": "Rendering cloud-init user-data",
+          "progress": 50
+        }
+      },
+      {
+        "id": "render_meta_data",
+        "type": "render_template",
+        "template": "meta_data",
+        "output_var": "meta_data_content",
+        "emit_event": {
+          "message": "Rendering cloud-init meta-data",
+          "progress": 60
+        }
+      },
+      {
+        "id": "inject_cloud_init",
+        "type": "modify_iso",
+        "iso_path": "{{iso_path}}",
+        "operations": [
+          {
+            "type": "inject_file",
+            "target_path": "/nocloud/user-data",
+            "content": "{{user_data_content}}"
+          },
+          {
+            "type": "inject_file",
+            "target_path": "/nocloud/meta-data",
+            "content": "{{meta_data_content}}"
+          },
+          {
+            "type": "patch_grub_config",
+            "grub_path": "/boot/grub/grub.cfg",
+            "pattern": "{{grub_patch_pattern}}",
+            "replacement": "{{grub_patch_replacement}}"
+          }
+        ],
+        "output_path": "{{iso_path}}",
+        "volume_label": "Ubuntu_Auto",
+        "emit_event": {
+          "message": "Injecting cloud-init configuration into ISO",
+          "progress": 80
+        }
+      },
+      {
+        "id": "store_password",
+        "type": "store_ephemeral_secret",
+        "key": "admin_password",
+        "value": "{{_generated_password_plaintext}}",
+        "emit_event": {
+          "message": "Storing password in memory (will be shown after write)",
+          "progress": 100
+        }
+      }
+    ],
+    "on_write_complete": [
+      {
+        "id": "show_password_button",
+        "type": "show_ephemeral_secret_button",
+        "key": "admin_password",
+        "button_label": "Reveal Admin Password",
+        "message_template": "Admin password for {{username}}@{{hostname}}: {{admin_password}}",
+        "auto_destroy": true,
+        "emit_event": {
+          "message": "USB write complete. Click button to reveal password.",
+          "progress": 100
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,340 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://metalstrapper.org/schemas/sparkplug-manifest-v1.json",
+  "title": "SparkPlug Manifest",
+  "description": "Declarative JSON manifest for SparkGTK plugins",
+  "type": "object",
+  "required": ["version", "metadata", "requires"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Manifest schema version",
+      "const": "1.0"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["name", "id"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique plugin identifier (lowercase, hyphens)",
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable plugin name"
+        },
+        "version": {
+          "type": "string",
+          "description": "Plugin version (semver recommended)"
+        },
+        "author": {
+          "type": "string",
+          "description": "Plugin author name or organization"
+        },
+        "description": {
+          "type": "string",
+          "description": "Brief description of plugin functionality"
+        },
+        "homepage": {
+          "type": "string",
+          "format": "uri",
+          "description": "Plugin homepage or repository URL"
+        }
+      }
+    },
+    "requires": {
+      "type": "object",
+      "description": "External dependencies and runtime requirements",
+      "properties": {
+        "commands": {
+          "type": "array",
+          "description": "External commands this plugin invokes",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Command name (e.g., 'xorriso', 'proxmox-auto-install-assistant')"
+              },
+              "description": {
+                "type": "string",
+                "description": "Why this command is needed"
+              },
+              "install_hint": {
+                "type": "string",
+                "description": "Installation suggestion (e.g., 'apt install xorriso')"
+              },
+              "allow_plugin_specific": {
+                "type": "boolean",
+                "default": false,
+                "description": "If true, allow this command (requires user confirmation)"
+              }
+            }
+          }
+        },
+        "python_version": {
+          "type": "string",
+          "description": "Minimum Python version (e.g., '3.8')"
+        }
+      }
+    },
+    "secure_manifest": false,
+    "preset_feeds": {
+      "type": "array",
+      "description": "Remote feeds that provide presets (JSON Feed 1.1 format)",
+      "items": {
+        "type": "object",
+        "required": ["url"],
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "HTTPS URL of the preset feed (JSON Feed 1.1)"
+          },
+          "verify_signature": {
+            "type": "boolean",
+            "default": false,
+            "description": "Verify Ed25519 signature if present (metalstrapper_signature)"
+          },
+          "description": {
+            "type": "string",
+            "description": "Human-readable description of this feed source"
+          }
+        }
+      }
+    },
+    "presets": {
+      "type": "array",
+      "description": "Static OS presets this plugin provides",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "url"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Preset identifier",
+            "pattern": "^[a-z0-9-]+$"
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name for preset"
+          },
+          "url": {
+            "type": "string",
+            "description": "ISO download URL (http/https/magnet)"
+          },
+          "sha256": {
+            "type": "string",
+            "description": "Expected SHA256 checksum of the ISO",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "distro": {
+            "type": "string",
+            "description": "Distribution family (arch, debian, etc.)"
+          },
+          "metadata": {
+            "type": "object",
+            "description": "Additional preset metadata",
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "config_fields": {
+      "type": "array",
+      "description": "User-configurable fields shown in UI",
+      "items": {
+        "type": "object",
+        "required": ["id", "label", "type"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Field identifier (used in templates as {{field_id}})"
+          },
+          "label": {
+            "type": "string",
+            "description": "Display label"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["text", "password", "select", "multiline"],
+            "description": "Input field type"
+          },
+          "default": {
+            "description": "Default value"
+          },
+          "required": {
+            "type": "boolean",
+            "default": false,
+            "description": "Whether field is required"
+          },
+          "description": {
+            "type": "string",
+            "description": "Help text shown below field"
+          },
+          "placeholder": {
+            "type": "string",
+            "description": "Placeholder text for empty fields"
+          },
+          "big": {
+            "type": "boolean",
+            "default": false,
+            "description": "Use full-width layout (for multiline)"
+          },
+          "options": {
+            "type": "array",
+            "description": "Options for select type",
+            "items": {
+              "type": "object",
+              "required": ["value", "label"],
+              "properties": {
+                "value": {
+                  "description": "Option value"
+                },
+                "label": {
+                  "type": "string",
+                  "description": "Display label"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "templates": {
+      "type": "object",
+      "description": "Named templates for generating scripts/configs",
+      "additionalProperties": {
+        "type": "string",
+        "description": "Template string with {{variable}} syntax"
+      }
+    },
+    "ui_visibility": {
+      "type": "object",
+      "description": "Conditions for showing plugin UI",
+      "properties": {
+        "when": {
+          "type": "object",
+          "description": "Show plugin when condition matches",
+          "properties": {
+            "preset_distro": {
+              "type": "array",
+              "items": {"type": "string"},
+              "description": "Show only for these distro values"
+            },
+            "preset_id": {
+              "type": "array",
+              "items": {"type": "string"},
+              "description": "Show only for these preset IDs"
+            }
+          }
+        }
+      }
+    },
+    "actions": {
+      "type": "object",
+      "description": "Lifecycle hook implementations",
+      "properties": {
+        "on_iso_ready": {
+          "type": "array",
+          "description": "Actions to run when ISO is ready for processing",
+          "items": {"$ref": "#/definitions/action"}
+        },
+        "on_write_complete": {
+          "type": "array",
+          "description": "Actions to run after USB write completes",
+          "items": {"$ref": "#/definitions/action"}
+        }
+      }
+    },
+    "signature": false
+  },
+  "definitions": {
+    "action": {
+      "type": "object",
+      "required": ["id", "type"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Action identifier (for logging)"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "render_template",
+            "run_command",
+            "write_file",
+            "compute_file_hash",
+            "create_partition",
+            "write_partition_files",
+            "generate_receipt"
+          ],
+          "description": "Action type"
+        },
+        "when": {
+          "$ref": "#/definitions/condition",
+          "description": "Optional condition to execute this action"
+        },
+        "template": {
+          "type": "string",
+          "description": "Template name (for render_template)"
+        },
+        "output_var": {
+          "type": "string",
+          "description": "Store result in this variable for later actions"
+        },
+        "command": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Command and args (for run_command)"
+        },
+        "sudo": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run command with sudo using -n (non-interactive) flag. Requires passwordless sudo configuration (NOPASSWD in /etc/sudoers). Used for autoinstall workflows that cannot prompt for passwords."
+        },
+        "content": {
+          "type": "string",
+          "description": "File content or {{variable}} reference (for write_file)"
+        },
+        "path": {
+          "type": "string",
+          "description": "File path with {{variable}} substitution (for write_file)"
+        },
+        "permissions": {
+          "type": "string",
+          "pattern": "^[0-7]{3,4}$",
+          "description": "Octal file permissions (e.g., '755')"
+        },
+        "emit_event": {
+          "type": "object",
+          "description": "Emit progress event",
+          "properties": {
+            "message": {"type": "string"},
+            "progress": {"type": "integer", "minimum": 0, "maximum": 100}
+          }
+        }
+      }
+    },
+    "condition": {
+      "type": "object",
+      "required": ["field", "operator"],
+      "properties": {
+        "field": {
+          "type": "string",
+          "description": "Config field ID to evaluate"
+        },
+        "operator": {
+          "type": "string",
+          "enum": ["not_empty", "empty", "equals", "not_equals", "in", "not_in"],
+          "description": "Comparison operator"
+        },
+        "value": {
+          "description": "Value to compare against (for equals/in operators)"
+        }
+      }
+    }
+  }
+}

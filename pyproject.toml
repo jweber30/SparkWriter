@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spark-writer"
+version = "0.1.0"
+description = "GTK4 frontend for Spark Writer"
+authors = [{name = "J. Weber", email = "weber.jesse@gmail.com"}]
+dependencies = [
+    "requests",
+    "libtorrent",
+]
+requires-python = ">=3.10"
+
+[project.scripts]
+spark-writer = "spark_writer.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
