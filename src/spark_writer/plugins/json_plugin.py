@@ -147,13 +147,17 @@ class JsonSparkPlug(SparkPlug):
             
             # Check if command exists on system
             if not shutil.which(cmd_name):
-                install_hint = cmd_spec.get('install_hint', '')
-                hint_str = f" ({install_hint})" if install_hint else ""
-                missing.append(f"{cmd_name}{hint_str}")
+                package = cmd_spec.get('package', '')
+                if package:
+                    missing.append(f"missing {cmd_name}: sudo apt install -y {package}")
+                else:
+                    install_hint = cmd_spec.get('install_hint', '')
+                    hint_str = f" ({install_hint})" if install_hint else ""
+                    missing.append(f"missing {cmd_name}{hint_str}")
 
         if missing:
             self._available = False
-            self._unavailable_reason = "Missing required commands: " + ", ".join(missing)
+            self._unavailable_reason = "; ".join(missing)
         else:
             self._available = True
             self._unavailable_reason = None

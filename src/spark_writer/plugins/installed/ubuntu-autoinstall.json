@@ -11,6 +11,7 @@
     "commands": [
       {
         "name": "mkpasswd",
+        "package": "whois",
         "description": "Generate password hashes for autoinstall workflows",
         "allow_plugin_specific": true
       }

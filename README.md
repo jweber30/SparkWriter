@@ -147,11 +147,12 @@ When installing from URL (`spark://plugin/add?...`), Spark Writer applies trust 
 - `file://` and local paths: trusted
 - `localhost`: allowed with confirmation
 - `http://`: blocked by default
-- `https://` trusted hosts (auto-trusted):
-    - `github.io`
-    - `raw.githubusercontent.com`
-    - `gitlab.com`
-    - `gist.githubusercontent.com`
+- GitHub-hosted URLs (`raw.githubusercontent.com`, `gist.githubusercontent.com`, `*.github.io`):
+    - High-security online authorization is required.
+    - `metadata.github_username` must exist.
+    - Username derived from URL must match `metadata.github_username`.
+    - `metadata.signature.openssh` must verify against one of `https://api.github.com/users/{username}/ssh_signing_keys`.
+    - If username cannot be derived and cross-checked, installation is blocked.
 - Other `https://` hosts: allowed, but user sees confirmation prompt
 
 Recommended for external distribution:
@@ -169,6 +170,7 @@ Current behavior:
 - No automatic remote manifest updates after install.
 - Publisher changes are picked up only when the user explicitly reinstalls the updated manifest URL.
 - Legacy secure-manifest keys (`secure_manifest`, `signature`) are deprecated and rejected.
+- GitHub signature authorization runs during explicit install/reinstall flows (no background auto-update checks).
 
 ### 4. Installation Paths
 

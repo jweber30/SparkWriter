@@ -40,6 +40,32 @@
           "type": "string",
           "format": "uri",
           "description": "Plugin homepage or repository URL"
+        },
+        "github_username": {
+          "type": "string",
+          "description": "GitHub username for GitHub-hosted manifest authorization",
+          "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})$"
+        },
+        "signature": {
+          "type": "object",
+          "description": "Manifest authorization signature metadata",
+          "required": ["openssh", "algorithm"],
+          "properties": {
+            "openssh": {
+              "type": "string",
+              "description": "ASCII-armored OpenSSH signature generated over canonical manifest payload"
+            },
+            "algorithm": {
+              "type": "string",
+              "enum": ["openssh-ssh-ed25519"],
+              "description": "Signature algorithm"
+            },
+            "signed_payload_version": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Canonical payload format version"
+            }
+          }
         }
       }
     },
@@ -61,6 +87,10 @@
               "description": {
                 "type": "string",
                 "description": "Why this command is needed"
+              },
+              "package": {
+                "type": "string",
+                "description": "Debian/Ubuntu package that provides this command (e.g., 'whois', 'xorriso')"
               },
               "install_hint": {
                 "type": "string",

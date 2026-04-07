@@ -12,6 +12,7 @@ gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, Gio, GLib, Gdk
 
 from .window import SparkWindow
+from .plugins.signing import is_github_manifest_url, verify_github_signed_manifest
 from .plugins.trust import evaluate_trust
 
 class SparkApplication(Adw.Application):
@@ -125,6 +126,16 @@ class SparkApplication(Adw.Application):
             # Step 4: Parse and validate manifest
             with open(tmp_path, 'r', encoding='utf-8') as f:
                 manifest = json.load(f)
+
+            # High-security online mode for GitHub-hosted manifests:
+            # require URL-owner cross-check and valid SSH signature.
+            if is_github_manifest_url(url):
+                verified, reason = verify_github_signed_manifest(manifest, url)
+                if not verified:
+                    raise ValueError(
+                        "GitHub manifest authorization failed: "
+                        + reason
+                    )
 
             legacy_secure_keys = [key for key in ("secure_manifest", "signature") if key in manifest]
             if legacy_secure_keys:

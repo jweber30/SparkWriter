@@ -50,7 +50,11 @@ class PluginManager:
         """Load JSON-based plugins from package and user directory."""
         if isinstance(package, str):
             package_name = package
-            package = importlib.import_module(package)
+            try:
+                package = importlib.import_module(package)
+            except ModuleNotFoundError:
+                logger.warning(f"Plugin package not found: {package_name}; skipping")
+                return
         else:
             package_name = package.__name__
             

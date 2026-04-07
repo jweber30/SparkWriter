@@ -113,7 +113,6 @@ class SparkWindow(Adw.ApplicationWindow):
         
         # Load Plugins
         self._plugin_manager.load_plugins("spark_writer.plugins.installed")
-        self._plugin_manager.load_plugins("spark_writer.plugins.available")
         
         # Load All Presets
         self._load_all_presets()
@@ -140,7 +139,6 @@ class SparkWindow(Adw.ApplicationWindow):
         
         # Reload plugins
         self._plugin_manager.load_plugins("spark_writer.plugins.installed")
-        self._plugin_manager.load_plugins("spark_writer.plugins.available")
         
         # Refresh presets
         self._load_all_presets()
