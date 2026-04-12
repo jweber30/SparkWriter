@@ -247,6 +247,11 @@ class SparkWindow(Adw.ApplicationWindow):
         self._save_iso_btn.add_css_class("pill")
         self._save_iso_btn.connect("clicked", self._on_save_iso_clicked)
         self._action_bar.pack_end(self._save_iso_btn)
+
+        self._reset_form_btn = Gtk.Button(label="Reset Form")
+        self._reset_form_btn.add_css_class("pill")
+        self._reset_form_btn.connect("clicked", self._on_reset_form_clicked)
+        self._action_bar.pack_start(self._reset_form_btn)
         
         return page
 
@@ -291,8 +296,43 @@ class SparkWindow(Adw.ApplicationWindow):
         
         self._status_page.set_child(progress_box)
         toolbar_view.set_content(self._status_page)
+
+        progress_action_bar = Gtk.ActionBar()
+        toolbar_view.add_bottom_bar(progress_action_bar)
+
+        back_btn = Gtk.Button(label="Back to Setup")
+        back_btn.add_css_class("pill")
+        back_btn.connect("clicked", self._on_back_to_setup_clicked)
+        progress_action_bar.pack_start(back_btn)
+
+        reset_from_progress_btn = Gtk.Button(label="Reset Form")
+        reset_from_progress_btn.add_css_class("pill")
+        reset_from_progress_btn.connect("clicked", self._on_reset_form_clicked)
+        progress_action_bar.pack_end(reset_from_progress_btn)
         
         return page
+
+    def _on_back_to_setup_clicked(self, *_args) -> None:
+        self._return_to_config_page()
+
+    def _return_to_config_page(self) -> None:
+        if self.nav_view.get_visible_page() == self.progress_page:
+            self.nav_view.pop()
+
+        self._update_flash_button_state()
+
+    def _on_reset_form_clicked(self, *_args) -> None:
+        """Reset current plugin form fields to manifest defaults and refresh state."""
+        self._flash_in_progress = False
+        self._clear_secrets_display()
+
+        if self.current_plugin:
+            self._form_builder.reset(self._pref_page)
+            self._form_builder.add_fields(self.current_plugin.get_config_schema(), self._pref_page)
+
+        self._return_to_config_page()
+        self._refresh_drives()
+        self._update_flash_button_state()
 
     def _refresh_drives(self, *args):
         drives = list_removable_drives()
@@ -430,6 +470,7 @@ class SparkWindow(Adw.ApplicationWindow):
     def _start_flash_workflow(self, preset: Dict[str, Any]) -> None:
         self._flash_in_progress = True
         self._update_flash_button_state()
+        self._clear_secrets_display()
 
         # Calculate which stages this flash will need
         stages = [PipelineStage.DOWNLOAD]
@@ -595,6 +636,7 @@ class SparkWindow(Adw.ApplicationWindow):
         """Start the download and processing workflow after save location is chosen."""
         self._flash_in_progress = True
         self._update_flash_button_state()
+        self._clear_secrets_display()
 
         # Calculate stages for ISO save (no WRITE stage)
         stages = [PipelineStage.DOWNLOAD]
@@ -713,6 +755,10 @@ class SparkWindow(Adw.ApplicationWindow):
 
     def _on_iso_save_complete(self, dest_path):
         """Handle successful ISO save completion."""
+        secrets = self._collect_completion_secrets()
+        if secrets:
+            self._update_secrets_display(secrets)
+
         self.status_label.set_text(f"ISO saved to {Path(dest_path).name}")
         self._status_page.set_icon_name("emblem-ok-symbolic")
         self._status_page.set_title("ISO Saved Successfully")
@@ -872,15 +918,10 @@ class SparkWindow(Adw.ApplicationWindow):
         if self.pipeline:
             self.pipeline.complete_stage(PipelineStage.WRITE)
             self.pipeline.success("Flash completed successfully!")
-        
-        # Retrieve and display generated secrets
-        if self.current_plugin:
-            try:
-                secrets = self.current_plugin.get_ephemeral_secrets()
-                if secrets:
-                    self._update_secrets_display(secrets)
-            except Exception as e:
-                logger.warning(f"Failed to retrieve ephemeral secrets: {e}")
+
+        secrets = self._collect_completion_secrets()
+        if secrets:
+            self._update_secrets_display(secrets)
         
         self.status_label.set_text("Done!")
         self._status_page.set_title("Success")
@@ -1064,16 +1105,52 @@ class SparkWindow(Adw.ApplicationWindow):
 
     def _reset_flash_state(self) -> None:
         self._flash_in_progress = False
+        self._refresh_drives()
         self._update_flash_button_state()
 
-    def _update_secrets_display(self, secrets: Dict[str, str]) -> None:
-        """Update the secrets display with the provided secrets dictionary."""
-        # Clear existing secret widgets
+    def _collect_completion_secrets(self) -> Dict[str, str]:
+        """Collect secrets to display on completion, including root password fallbacks."""
+        secrets: Dict[str, str] = {}
+
+        if self.current_plugin:
+            try:
+                plugin_secrets = self.current_plugin.get_ephemeral_secrets()
+                if isinstance(plugin_secrets, dict):
+                    secrets.update({str(k): str(v) for k, v in plugin_secrets.items() if str(v).strip()})
+            except Exception as e:
+                logger.warning(f"Failed to retrieve ephemeral secrets: {e}")
+
+        ui_values = getattr(self, 'ui_values', {})
+        if isinstance(ui_values, dict):
+            # Ensure root credentials are shown even when provided by user input.
+            root_password = str(ui_values.get('root-password') or '').strip()
+            root_password_hashed = str(ui_values.get('root-password-hashed') or '').strip()
+
+            has_root_secret = any(
+                str(key).lower() in {'proxmox_root_password', 'root_password'}
+                for key in secrets.keys()
+            )
+
+            if root_password and not has_root_secret:
+                secrets['root_password'] = root_password
+            elif root_password_hashed and 'root_password_hashed' not in secrets:
+                secrets['root_password_hashed'] = root_password_hashed
+
+        return secrets
+
+    def _clear_secrets_display(self) -> None:
+        """Clear any previously rendered secret widgets."""
         child = self._secrets_container.get_first_child()
         while child:
             next_child = child.get_next_sibling()
             self._secrets_container.remove(child)
             child = next_child
+        self._secrets_container.set_visible(False)
+
+    def _update_secrets_display(self, secrets: Dict[str, str]) -> None:
+        """Update the secrets display with the provided secrets dictionary."""
+        # Clear existing secret widgets
+        self._clear_secrets_display()
         
         if not secrets:
             self._secrets_container.set_visible(False)

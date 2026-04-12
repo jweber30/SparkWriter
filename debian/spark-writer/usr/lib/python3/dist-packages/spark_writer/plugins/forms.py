@@ -52,20 +52,8 @@ class ConfigFormBuilder:
 
         group.add(widget)
         
-        # Store the actual input widget for value extraction
-        input_widget = widget
-        if isinstance(widget, Adw.ActionRow):
-            # Find the input widget in the suffix
-            # This is a bit hacky but Adw.ActionRow doesn't expose suffixes easily
-            # We rely on knowing what we built in _build_input_widget
-            
-            # For multiline (ScrolledWindow -> TextView)
-            suffix = widget.get_last_child() # Usually the suffix is last?
-            # Actually, let's just store the widget we created and added as suffix
-            # We need to return it from _build_input_widget or handle it there.
-            pass
-
         self._bindings[field.id] = FieldBinding(field=field, widget=widget, row=widget)
+        self._update_binding_validation_state(self._bindings[field.id])
 
     # ------------------------------------------------------------------
     # Value collection
@@ -78,14 +66,44 @@ class ConfigFormBuilder:
         return values
 
     def are_required_fields_filled(self) -> bool:
-        """Check if all required fields have non-empty values."""
+        """Check if all required fields have non-empty values and update UI state."""
+        all_valid = True
         for binding in self._bindings.values():
-            if binding.field.required:
-                value = self._extract_value(binding.field, binding.widget)
-                # Check if value is empty (empty string, None, or whitespace-only)
-                if not value or (isinstance(value, str) and not value.strip()):
-                    return False
-        return True
+            if not self._update_binding_validation_state(binding):
+                all_valid = False
+        return all_valid
+
+    def _is_empty_value(self, value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return not value.strip()
+        return not bool(value)
+
+    def _set_invalid_state(self, binding: FieldBinding, invalid: bool) -> None:
+        """Apply or clear visual invalid styling for a field binding."""
+        targets: List[Gtk.Widget] = [binding.row]
+        if hasattr(binding.widget, "_input_widget"):
+            real_widget = binding.widget._input_widget
+            if isinstance(real_widget, Gtk.Widget):
+                targets.append(real_widget)
+
+        for widget in targets:
+            if invalid:
+                widget.add_css_class("error")
+            else:
+                widget.remove_css_class("error")
+
+    def _update_binding_validation_state(self, binding: FieldBinding) -> bool:
+        """Return True when binding satisfies current validation rules."""
+        if not binding.field.required:
+            self._set_invalid_state(binding, False)
+            return True
+
+        value = self._extract_value(binding.field, binding.widget)
+        is_valid = not self._is_empty_value(value)
+        self._set_invalid_state(binding, not is_valid)
+        return is_valid
 
     def _notify_change(self, *args) -> None:
         """Trigger the on_change callback when any field changes."""

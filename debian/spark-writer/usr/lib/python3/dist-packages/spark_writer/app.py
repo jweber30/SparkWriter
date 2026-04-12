@@ -139,6 +139,9 @@ class SparkApplication(Adw.Application):
             with open(tmp_path, 'r', encoding='utf-8') as f:
                 manifest = json.load(f)
 
+            # TODO(next sprint): Validate manifest config_fields.pattern regex strings
+            # during install-time checks. For now, publishers must self-test patterns.
+
             # High-security online mode for GitHub-hosted manifests:
             # require URL-owner cross-check and valid SSH signature.
             if is_github_manifest_url(normalized_url):

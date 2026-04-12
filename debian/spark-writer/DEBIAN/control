@@ -1,8 +1,8 @@
 Package: spark-writer
-Version: 0.1.14-1
+Version: 0.1.16-1
 Architecture: all
 Maintainer: J. Weber <weber.jesse@gmail.com>
-Installed-Size: 1668
+Installed-Size: 1671
 Depends: python3-jinja2, python3-libtorrent, python3-nacl, python3-requests, python3:any (>= 3.10~), python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, libnotify-bin
 Breaks: spark-gtk (<< 0.2.0)
 Replaces: spark-gtk (<< 0.2.0)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spark-writer"
-version = "0.1.14"
+version = "0.1.16"
 description = "GTK4 frontend for Spark Writer"
 authors = [{name = "J. Weber", email = "weber.jesse@gmail.com"}]
 dependencies = [
