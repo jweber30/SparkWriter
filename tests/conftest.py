@@ -1,6 +1,7 @@
 """Shared test fixtures for SparkWriter test suite."""
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -33,31 +34,21 @@ def proxmox_manifest(proxmox_manifest_path):
 @pytest.fixture
 def proxmox_plugin(proxmox_manifest_path, tmp_path):
     """Create a JsonSparkPlug instance from the Proxmox manifest.
-    
-    This fixture simulates the plugin installation flow by:
-    1. Copying the manifest to a temp directory
-    2. Loading it as a plugin
-    3. Writing an approval file for plugin-specific commands
+
+    This fixture intentionally does not pre-seed command approvals.
+    Invocation-time approval behavior should be controlled by each test.
     """
-    # Copy manifest to temp dir (simulating installation)
+    # Copy manifest and any sidecar files to temp dir (simulating installation)
     temp_manifest = tmp_path / "proxmox-tailscale.json"
     temp_manifest.write_text(proxmox_manifest_path.read_text())
-    
-    plugin = JsonSparkPlug(str(temp_manifest))
-    
-    # Write approval for proxmox-auto-install-assistant
-    approval_file = tmp_path / ".proxmox-tailscale.approval"
-    approval_data = {
-        "plugin_id": "proxmox-tailscale",
-        "plugin_name": "Proxmox Tailscale",
-        "approved_commands": ["proxmox-auto-install-assistant"]
-    }
-    approval_file.write_text(json.dumps(approval_data, indent=2))
-    
-    # Reload plugin to pick up approval
-    plugin._load_approved_commands()
-    
-    return plugin
+
+    manifest_dir = proxmox_manifest_path.parent
+    stem = proxmox_manifest_path.stem
+    for sidecar in manifest_dir.iterdir():
+        if sidecar.is_file() and sidecar.suffix != ".json" and sidecar.name.startswith(stem):
+            shutil.copy(sidecar, tmp_path / sidecar.name)
+
+    return JsonSparkPlug(str(temp_manifest))
 
 
 @pytest.fixture

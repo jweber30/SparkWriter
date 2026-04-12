@@ -1,6 +1,7 @@
 import sys
 import os
 import shutil
+import tempfile
 import gi
 
 # Prefer Wayland, fall back to X11
@@ -12,7 +13,14 @@ gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, Gio, GLib, Gdk
 
 from .window import SparkWindow
-from .plugins.signing import is_github_manifest_url, verify_github_signed_manifest
+from .plugins.signing import (
+    build_manifest_download_request,
+    extract_github_username_from_url,
+    is_github_manifest_url,
+    normalize_github_manifest_url,
+    verify_github_signed_manifest,
+)
+from .plugins.manifest_assets import discover_template_sidecars, resolve_sidecar_url
 from .plugins.trust import evaluate_trust
 
 class SparkApplication(Adw.Application):
@@ -108,18 +116,22 @@ class SparkApplication(Adw.Application):
         # Auto-trusted source - proceed directly
         self._download_and_install_plugin(url)
     
-    def _download_and_install_plugin(self, url: str):
+    def _download_and_install_plugin(self, url: str, github_token: str | None = None):
         """Download and install plugin after trust confirmation."""
         import json
+        import urllib.error
         import urllib.request
-        import tempfile
         from pathlib import Path
+        tmp_path = None
         try:
+            normalized_url = normalize_github_manifest_url(url)
+
             # Step 3: Download manifest
             print(f"Downloading manifest...")
             with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.json') as tmp:
                 tmp_path = tmp.name
-                with urllib.request.urlopen(url, timeout=30) as response:
+                request = build_manifest_download_request(normalized_url, github_token)
+                with urllib.request.urlopen(request, timeout=30) as response:
                     content = response.read()
                     tmp.write(content)
             
@@ -127,10 +139,13 @@ class SparkApplication(Adw.Application):
             with open(tmp_path, 'r', encoding='utf-8') as f:
                 manifest = json.load(f)
 
+            # TODO(next sprint): Validate manifest config_fields.pattern regex strings
+            # during install-time checks. For now, publishers must self-test patterns.
+
             # High-security online mode for GitHub-hosted manifests:
             # require URL-owner cross-check and valid SSH signature.
-            if is_github_manifest_url(url):
-                verified, reason = verify_github_signed_manifest(manifest, url)
+            if is_github_manifest_url(normalized_url):
+                verified, reason = verify_github_signed_manifest(manifest, normalized_url)
                 if not verified:
                     raise ValueError(
                         "GitHub manifest authorization failed: "
@@ -192,7 +207,7 @@ class SparkApplication(Adw.Application):
                 os.unlink(tmp_path)
                 return
             
-            # Step 6: Show command approval dialog if plugin-specific commands exist
+            # Step 6: Show command disclosure dialog if plugin-specific commands exist
             if plugin_specific:
                 cmd_details = "\n".join(
                     f"  • {cmd}" + (f": {desc}" if desc else "")
@@ -202,74 +217,218 @@ class SparkApplication(Adw.Application):
                 approval_msg = (
                     f"Plugin: {plugin_name}\n"
                     + (f"{plugin_desc}\n\n" if plugin_desc else "\n")
-                    + f"This plugin requires permission to execute:\n\n"
+                    + f"This plugin may execute the following commands at runtime:\n\n"
                     + cmd_details
-                    + "\n\nThese commands will only be executed when this plugin runs.\n"
-                    + "Do you want to install this plugin?"
+                    + "\n\nYou will be prompted to approve commands at invocation time.\n"
+                    + "Install this plugin now?"
                 )
                 
                 def on_approval_response(dialog, response):
                     dialog.destroy()
                     if response == Gtk.ResponseType.YES:
                         # User approved - install plugin
-                        self._finalize_plugin_install(tmp_path, plugin_id, plugin_name, manifest)
+                        self._finalize_plugin_install(
+                            tmp_path,
+                            plugin_id,
+                            plugin_name,
+                            manifest,
+                            normalized_url,
+                            github_token,
+                        )
                     else:
                         # User rejected - clean up
                         os.unlink(tmp_path)
                         print(f"Plugin installation cancelled by user")
                 
                 self._show_confirmation_dialog(
-                    "Command Approval Required",
+                    "Command Disclosure",
                     approval_msg,
                     on_approval_response
                 )
             else:
                 # No plugin-specific commands - install directly
-                self._finalize_plugin_install(tmp_path, plugin_id, plugin_name, manifest)
+                self._finalize_plugin_install(
+                    tmp_path,
+                    plugin_id,
+                    plugin_name,
+                    manifest,
+                    normalized_url,
+                    github_token,
+                )
+
+        except urllib.error.HTTPError as e:
+            needs_auth = (
+                e.code in (401, 403)
+                and is_github_manifest_url(url)
+                and not github_token
+            )
+            if needs_auth:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                self._show_github_auth_dialog(url)
+                return
+
+            print(f"Failed to add JSON plugin: {e}")
+            self._show_error_dialog("Installation Failed", f"HTTP error: {e}")
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
                 
         except Exception as e:
             print(f"Failed to add JSON plugin: {e}")
             import traceback
             traceback.print_exc()
             self._show_error_dialog("Installation Failed", str(e))
-            if os.path.exists(tmp_path):
+            if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
+
+    def _show_github_auth_dialog(self, url: str):
+        """Prompt the user for a one-time GitHub token and retry download."""
+        win = self.props.active_window
+        normalized_url = normalize_github_manifest_url(url)
+        expected_user = extract_github_username_from_url(normalized_url) or "unknown"
+
+        dialog = Gtk.Dialog(
+            transient_for=win,
+            modal=True,
+            title="GitHub Authentication Required",
+        )
+        dialog.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Continue", Gtk.ResponseType.OK)
+
+        content = dialog.get_content_area()
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_top(12)
+        box.set_margin_bottom(12)
+        box.set_margin_start(12)
+        box.set_margin_end(12)
+
+        label = Gtk.Label(
+            label=(
+                "This manifest appears to require GitHub authentication.\n\n"
+                f"Expected GitHub owner: {expected_user}\n"
+                "Provide a one-time GitHub token with read access to the repository."
+            )
+        )
+        label.set_wrap(True)
+        label.set_xalign(0)
+        box.append(label)
+
+        token_entry = Gtk.PasswordEntry()
+        token_entry.set_placeholder_text("github_pat_... or ghp_...")
+        box.append(token_entry)
+
+        open_page = Gtk.Button(label="Open GitHub Fine-Grained Token Settings")
+
+        def on_open_page(_button):
+            Gio.AppInfo.launch_default_for_uri("https://github.com/settings/personal-access-tokens/new", None)
+
+        open_page.connect("clicked", on_open_page)
+        box.append(open_page)
+
+        content.append(box)
+
+        def on_response(dlg, response):
+            dlg.destroy()
+            if response != Gtk.ResponseType.OK:
+                return
+
+            token = token_entry.get_text().strip()
+            if not token:
+                self._show_error_dialog("Authentication Required", "No GitHub token provided.")
+                return
+
+            GLib.idle_add(self._download_and_install_plugin, url, token)
+
+        dialog.connect("response", on_response)
+        dialog.present()
     
-    def _finalize_plugin_install(self, tmp_path: str, plugin_id: str, plugin_name: str, manifest: dict):
-        """Complete plugin installation after all approvals."""
-        import json
+    def _download_template_sidecars(
+        self,
+        *,
+        manifest_url: str,
+        manifest: dict,
+        github_token: str | None,
+    ) -> list[tuple[str, str]]:
+        """Download manifest-referenced template sidecar files.
+
+        Returns a list of (relative_path, temp_file_path) tuples.
+        """
+        import urllib.request
+
+        sidecar_refs = discover_template_sidecars(manifest)
+        downloaded: list[tuple[str, str]] = []
+
+        for sidecar_ref in sidecar_refs:
+            sidecar_url = resolve_sidecar_url(manifest_url, sidecar_ref)
+            with tempfile.NamedTemporaryFile(mode='wb', delete=False) as tmp:
+                request = build_manifest_download_request(sidecar_url, github_token)
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    tmp.write(response.read())
+                downloaded.append((sidecar_ref, tmp.name))
+
+        return downloaded
+
+    def _cleanup_paths(self, paths: list[str]) -> None:
+        """Best-effort cleanup for temporary files and directories."""
+        for path in paths:
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                elif os.path.exists(path):
+                    os.unlink(path)
+            except OSError:
+                pass
+
+    def _finalize_plugin_install(
+        self,
+        tmp_path: str,
+        plugin_id: str,
+        plugin_name: str,
+        manifest: dict,
+        manifest_url: str,
+        github_token: str | None,
+    ):
+        """Complete plugin installation after disclosure and dependency checks."""
+        downloaded_sidecars: list[tuple[str, str]] = []
+        stage_dir = None
         try:
+            downloaded_sidecars = self._download_template_sidecars(
+                manifest_url=manifest_url,
+                manifest=manifest,
+                github_token=github_token,
+            )
+
             # Install to plugins directory
             data_home = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
             dst_dir = os.path.join(data_home, "spark-writer", "plugins")
             os.makedirs(dst_dir, exist_ok=True)
-            
+
+            stage_dir = tempfile.mkdtemp(prefix=f"spark-plugin-{plugin_id}-")
+            stage_manifest = os.path.join(stage_dir, f"{plugin_id}.json")
+            shutil.move(tmp_path, stage_manifest)
+
+            for rel_path, temp_file in downloaded_sidecars:
+                target = os.path.join(stage_dir, rel_path)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                shutil.move(temp_file, target)
+
             dst_file = os.path.join(dst_dir, f"{plugin_id}.json")
-            
-            # Create approval metadata file with approved commands
-            approved_commands = []
-            for cmd in manifest.get('requires', {}).get('commands', []):
-                cmd_name = cmd.get('name')
-                if not cmd_name:
-                    continue
-                if cmd.get('allow_plugin_specific', True):
-                    approved_commands.append(cmd_name)
-            
-            approval_data = {
-                'plugin_id': plugin_id,
-                'plugin_name': plugin_name,
-                'approved_commands': approved_commands,
-                'approved_at': str(__import__('datetime').datetime.now())
-            }
-            
-            approval_file = os.path.join(dst_dir, f".{plugin_id}.approval")
-            with open(approval_file, 'w') as f:
-                json.dump(approval_data, f, indent=2)
-            
-            # Move manifest to final location
-            shutil.move(tmp_path, dst_file)
+
+            # Replace manifest and copy sidecars from staging.
+            os.replace(stage_manifest, dst_file)
+            for rel_path, _temp_file in downloaded_sidecars:
+                source = os.path.join(stage_dir, rel_path)
+                destination = os.path.join(dst_dir, rel_path)
+                os.makedirs(os.path.dirname(destination), exist_ok=True)
+                os.replace(source, destination)
+
+            if stage_dir:
+                shutil.rmtree(stage_dir, ignore_errors=True)
+
             print(f"JSON plugin installed to {dst_file}")
-            print(f"Command approvals saved to {approval_file}")
+            if downloaded_sidecars:
+                print(f"Downloaded {len(downloaded_sidecars)} template sidecar file(s)")
+            print("Runtime command approval will be requested on first invocation")
             
             # Reload plugins
             win = self.props.active_window
@@ -281,6 +440,11 @@ class SparkApplication(Adw.Application):
             import traceback
             traceback.print_exc()
             self._show_error_dialog("Installation Failed", str(e))
+            cleanup_paths = [tmp_path]
+            cleanup_paths.extend(temp_path for _rel, temp_path in downloaded_sidecars)
+            if stage_dir:
+                cleanup_paths.append(stage_dir)
+            self._cleanup_paths(cleanup_paths)
     
     def _show_confirmation_dialog(self, title: str, message: str, callback):
         """Show a yes/no confirmation dialog."""

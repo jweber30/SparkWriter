@@ -4,12 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spark-writer"
-version = "0.1.0"
+version = "0.1.14"
 description = "GTK4 frontend for Spark Writer"
 authors = [{name = "J. Weber", email = "weber.jesse@gmail.com"}]
 dependencies = [
     "requests",
     "libtorrent",
+    "pynacl",
+    "jinja2",
 ]
 requires-python = ">=3.10"
 
@@ -18,3 +20,6 @@ spark-writer = "spark_writer.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+spark_writer = ["plugins/installed/*.json", "plugins/installed/*.sh", "plugins/schema/*.json"]

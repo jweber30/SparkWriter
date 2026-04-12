@@ -8,7 +8,7 @@ This test suite exercises the full SparkWriter flow:
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -54,9 +54,9 @@ class TestProxmoxManifestIntegration:
         command_names = [c["name"] for c in commands]
         assert "proxmox-auto-install-assistant" in command_names
 
-    def test_proxmox_manifest_command_approved(self, proxmox_plugin):
-        """Verify the plugin-specific command is in approval set."""
-        assert "proxmox-auto-install-assistant" in proxmox_plugin._plugin_allowed_commands
+    def test_proxmox_manifest_command_not_preapproved_at_load(self, proxmox_plugin):
+        """Invocation-time model should not auto-approve at plugin load."""
+        assert proxmox_plugin._plugin_allowed_commands == set()
 
     def test_proxmox_manifest_simulated_user_interaction(self, proxmox_plugin):
         """Simulate a user filling in config and selecting preset."""
@@ -82,26 +82,82 @@ class TestProxmoxManifestIntegration:
             if field.get("required"):
                 assert field_id in user_config
 
-    @patch("subprocess.run")
-    def test_proxmox_on_write_complete_actions_can_execute(self, mock_run, proxmox_plugin):
-        """Verify on_write_complete actions from manifest can execute."""
-        mock_run.return_value = MagicMock(returncode=0, stdout="")
-        
+    @patch("shutil.which")
+    def test_proxmox_on_write_complete_requires_runtime_approval_message(self, mock_which, proxmox_plugin):
+        """Unapproved commands should instruct runtime approval, not reinstall."""
+        mock_which.return_value = "/usr/bin/proxmox-auto-install-assistant"
+
         actions = proxmox_plugin.manifest.get("actions", {}).get("on_write_complete", [])
-        
-        # Mock the approver state
-        user_config = {
-            "contact-email": "admin@example.com",
-            "fqdn": "proxmox.example.org",
+        run_action = next((a for a in actions if a.get("type") == "run_command"), None)
+        if not run_action:
+            pytest.skip("Manifest has no run_command actions in on_write_complete")
+
+        with pytest.raises(RuntimeError) as exc_info:
+            proxmox_plugin._execute_action(
+                action=run_action,
+                ui_values={"contact-email": "admin@example.com", "fqdn": "proxmox.example.org"},
+                preset={"id": "proxmox-ve-9.1", "name": "Proxmox VE 9.1"},
+                device_path="/dev/sdb",
+            )
+
+        msg = str(exc_info.value)
+        assert "runtime approval" in msg.lower()
+        assert "reinstall" not in msg.lower()
+
+    def test_generate_ephemeral_password_action_populates_output_var(self, proxmox_plugin):
+        """Verify generate_ephemeral_password stores output in action vars."""
+        action = {
+            "id": "generate_test_password",
+            "type": "generate_ephemeral_password",
+            "length": 24,
+            "output_var": "generated_password",
         }
-        
-        # Attempt to execute each action
-        for action in actions:
-            if action.get("type") == "run_command":
-                # Verify command is in approved set (already tested above)
-                cmd_name = action.get("command", [None])[0]
-                if cmd_name:
-                    assert cmd_name in proxmox_plugin._plugin_allowed_commands
+
+        result = proxmox_plugin._execute_action(
+            action=action,
+            ui_values={},
+            preset={"id": "proxmox-ve-9.1", "name": "Proxmox VE 9.1"},
+            iso_path="/tmp/test.iso",
+        )
+
+        assert isinstance(result, str)
+        assert len(result) == 24
+        assert proxmox_plugin._action_vars["generated_password"] == result
+
+    def test_generate_root_password_action_from_manifest_sets_expected_var(self, proxmox_plugin):
+        """Verify real manifest action creates _generated_root_password_plaintext."""
+        actions = proxmox_plugin.manifest.get("actions", {}).get("on_iso_ready", [])
+        generate_action = next(a for a in actions if a.get("id") == "generate_root_password")
+
+        proxmox_plugin._execute_action(
+            action=generate_action,
+            ui_values={"root-password": ""},
+            preset={"id": "proxmox-ve-9.1", "name": "Proxmox VE 9.1"},
+            iso_path="/tmp/test.iso",
+        )
+
+        generated = proxmox_plugin._action_vars.get("_generated_root_password_plaintext")
+        assert isinstance(generated, str)
+        assert len(generated) == int(generate_action.get("length", 20))
+
+    def test_firstboot_template_renders_without_optional_apt_proxy(self, proxmox_plugin):
+        """Optional apt-proxy can be omitted without template rendering failures."""
+        actions = proxmox_plugin.manifest.get("actions", {}).get("on_iso_ready", [])
+        render_action = next(a for a in actions if a.get("id") == "render_firstboot_script")
+
+        result = proxmox_plugin._execute_action(
+            action=render_action,
+            ui_values={
+                "authkey": "tskey-auth-abc123xyzdef",
+                "hostname": "pve-test",
+                "tailscale-domain": "",
+            },
+            preset={"id": "proxmox-ve-9.1", "name": "Proxmox VE 9.1"},
+            iso_path="/tmp/test.iso",
+        )
+
+        assert isinstance(result, str)
+        assert "APT_CACHE_URL=" in result
 
 
 class TestManifestLoadingFromDisk:
@@ -139,18 +195,41 @@ class TestManifestLoadingFromDisk:
 class TestManifestPermissionFlow:
     """Test the permission flow when manifesting plugin-specific commands."""
 
-    def test_plugin_specific_command_requires_approval(self, proxmox_manifest_path, tmp_path):
-        """Verify that run_command fails without approval."""
+    def test_plugin_specific_command_requires_phase_batch_context(self, proxmox_manifest_path, tmp_path):
+        """Phase-level approval should include all commands needed in the phase."""
         from spark_writer.plugins.json_plugin import JsonSparkPlug
-        
-        # Copy manifest without approval file
+
         temp_manifest = tmp_path / "test-plugin.json"
         temp_manifest.write_text(proxmox_manifest_path.read_text())
-        
+
         plugin = JsonSparkPlug(str(temp_manifest))
-        
-        # Plugin loads, but command approval set is empty (no approval file)
+
         assert plugin._plugin_allowed_commands == set()
-        
-        # Attempt to run a command action should fail
-        # (if the manifest had run_command actions)
+
+        requires = plugin.manifest.get("requires", {}).get("commands", [])
+        declared = {c.get("name") for c in requires if c.get("name")}
+        phase_actions = plugin.manifest.get("actions", {}).get("on_write_complete", [])
+        phase_commands = {
+            a.get("command", [None])[0]
+            for a in phase_actions
+            if a.get("type") == "run_command" and a.get("command")
+        }
+        phase_commands.discard(None)
+
+        if not phase_commands:
+            pytest.skip("Manifest has no run_command actions in on_write_complete")
+
+        # Batch approval policy: pre-phase prompt should cover every phase command.
+        # This test encodes the contract by requiring the failure payload to mention
+        # all run_command executables in the current phase when unapproved.
+        with pytest.raises(RuntimeError) as exc_info:
+            plugin.on_write_complete(
+                device_path="/dev/sdb",
+                preset={"id": "proxmox-ve-9.1", "name": "Proxmox VE 9.1"},
+                ui_values={"contact-email": "admin@example.com", "fqdn": "proxmox.example.org"},
+            )
+
+        msg = str(exc_info.value)
+        for cmd_name in phase_commands:
+            assert cmd_name in declared
+            assert cmd_name in msg

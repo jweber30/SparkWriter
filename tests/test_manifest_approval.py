@@ -1,559 +1,391 @@
-"""Test manifest command approval and execution security.
+"""Tests for invocation-time command approval and disclosure contracts.
 
-This test suite validates that:
-1. Plugin-specific commands require user approval before execution
-2. Approved commands execute as expected
-3. Unapproved commands are blocked with clear error messages
-4. Approval state persists across plugin reloads
+These tests intentionally encode the target behavior for a migration where:
+1. Command approvals are requested at invocation time (not install time)
+2. Prompts happen as a batch per lifecycle phase
+3. Existing legacy .approval files are ignored and do not grant execution
+4. Install-time UI disclosure relies on schema-provided command metadata
 """
 
 import json
-import os
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Add src to path for imports
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PACKAGE_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from spark_writer.plugins.json_plugin import JsonSparkPlug
+from spark_writer.plugins.json_plugin import (
+    APPROVAL_MODEL_VERSION,
+    JsonSparkPlug,
+    RuntimeApprovalRequiredError,
+)
 
-
-# ============================================================================
-# Fixtures
-# ============================================================================
 
 @pytest.fixture
 def temp_plugin_dir(tmp_path):
-    """Create a temporary directory for plugin manifests and approval files."""
     plugin_dir = tmp_path / "plugins"
     plugin_dir.mkdir()
     return plugin_dir
 
 
-def make_manifest(
-    plugin_id="test-plugin",
-    plugin_name="Test Plugin",
-    commands=None,
-    actions=None,
-    **overrides
-):
-    """Factory for creating valid test manifests.
-    
-    Args:
-        plugin_id: Unique plugin identifier
-        plugin_name: Display name
-        commands: List of command specs (each with 'name' and optional 'allow_plugin_specific')
-        actions: List of action objects
-        **overrides: Additional top-level manifest fields
-    
-    Returns:
-        Dict representing a valid SparkPlug v1.0 manifest
-    """
+def make_manifest(plugin_id="test-plugin", commands=None, actions=None):
     if commands is None:
         commands = []
-    
+
     manifest = {
         "version": "1.0",
         "metadata": {
             "id": plugin_id,
-            "name": plugin_name,
+            "name": "Test Plugin",
         },
         "requires": {
-            "commands": commands
-        }
+            "commands": commands,
+        },
     }
-    
+
     if actions:
         manifest["actions"] = actions
-    
-    manifest.update(overrides)
+
     return manifest
 
 
-def write_approval(plugin_dir, plugin_id, approved_commands):
-    """Write an approval file for a plugin.
-    
-    Args:
-        plugin_dir: Directory containing plugins
-        plugin_id: Plugin ID
-        approved_commands: List of approved command names
-    """
+def write_manifest(plugin_dir: Path, plugin_id: str, manifest: dict) -> Path:
+    manifest_file = plugin_dir / f"{plugin_id}.json"
+    with open(manifest_file, "w", encoding="utf-8") as f:
+        json.dump(manifest, f)
+    return manifest_file
+
+
+def write_legacy_approval(plugin_dir: Path, plugin_id: str, approved_commands: list[str]) -> Path:
     approval_file = plugin_dir / f".{plugin_id}.approval"
-    approval_data = {
-        "plugin_id": plugin_id,
-        "approved_commands": approved_commands
-    }
-    with open(approval_file, "w") as f:
-        json.dump(approval_data, f)
+    with open(approval_file, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "plugin_id": plugin_id,
+                "approved_commands": approved_commands,
+            },
+            f,
+            indent=2,
+        )
+    return approval_file
 
 
-# ============================================================================
-# Tests: Basic Approval Logic
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Baseline behavior for invocation-time migration
+# ---------------------------------------------------------------------------
 
-def test_plugin_loads_with_no_approval_file(temp_plugin_dir):
-    """Plugin can load even if no approval file exists (backward compatibility)."""
+@patch("shutil.which")
+def test_plugin_loads_with_no_approval_file(mock_which, temp_plugin_dir):
+    mock_which.return_value = "/usr/bin/some-tool"
+
     manifest = make_manifest(
         plugin_id="minimal",
-        commands=[]
+        commands=[{"name": "some-tool", "allow_plugin_specific": True}],
     )
-    
-    manifest_file = temp_plugin_dir / "minimal.json"
-    with open(manifest_file, "w") as f:
-        json.dump(manifest, f)
-    
+    manifest_file = write_manifest(temp_plugin_dir, "minimal", manifest)
+
     plugin = JsonSparkPlug(str(manifest_file))
     assert plugin.is_available is True
     assert plugin._plugin_allowed_commands == set()
 
-
-@patch("shutil.which")
-def test_plugin_loads_and_reads_approval_file(mock_which, temp_plugin_dir):
-    """Plugin correctly reads and loads approved commands from approval file."""
-    mock_which.return_value = "/usr/bin/tool"  # Pretend all commands exist
-    
-    manifest = make_manifest(
-        plugin_id="with-approval",
-        commands=[
-            {"name": "mkpasswd", "allow_plugin_specific": True},
-            {"name": "custom-tool", "allow_plugin_specific": True},
-        ]
-    )
-    
-    manifest_file = temp_plugin_dir / "with-approval.json"
-    with open(manifest_file, "w") as f:
-        json.dump(manifest, f)
-    
-    # Write approval file with user's approved commands
-    write_approval(temp_plugin_dir, "with-approval", ["mkpasswd", "custom-tool"])
-    
-    plugin = JsonSparkPlug(str(manifest_file))
-    assert plugin.is_available is True
-    assert plugin._plugin_allowed_commands == {"mkpasswd", "custom-tool"}
-
-
-@patch("shutil.which")
-def test_plugin_approval_file_not_found_logs_debug(mock_which, temp_plugin_dir, caplog):
-    """Missing approval file doesn't crash; plugin loads with empty approval set."""
-    mock_which.return_value = "/usr/bin/tool"
-    
-    manifest = make_manifest(
-        plugin_id="no-approval-file",
-        commands=[{"name": "some-tool", "allow_plugin_specific": True}]
-    )
-    
-    manifest_file = temp_plugin_dir / "no-approval-file.json"
-    with open(manifest_file, "w") as f:
-        json.dump(manifest, f)
-    
-    # Don't write approval file
-    
-    with caplog.at_level("DEBUG"):
-        plugin = JsonSparkPlug(str(manifest_file))
-    
-    assert plugin.is_available is True
-    assert plugin._plugin_allowed_commands == set()
-    # Check that debug log mentions no approval file
-    assert any("No approval file found" in record.message for record in caplog.records)
-
-
-def test_plugin_corrupted_approval_file_logs_error(temp_plugin_dir, caplog):
-    """Corrupted approval file is skipped; plugin still loads."""
-    manifest = make_manifest(plugin_id="bad-approval")
-    
-    manifest_file = temp_plugin_dir / "bad-approval.json"
-    with open(manifest_file, "w") as f:
-        json.dump(manifest, f)
-    
-    # Write corrupted approval file
-    approval_file = temp_plugin_dir / ".bad-approval.approval"
-    with open(approval_file, "w") as f:
-        f.write("not valid json {")
-    
-    with caplog.at_level("ERROR"):
-        plugin = JsonSparkPlug(str(manifest_file))
-    
-    assert plugin.is_available is True
-    assert plugin._plugin_allowed_commands == set()
-    # Check that error log mentions failure to load
-    assert any("Failed to load approval file" in record.message for record in caplog.records)
-
-
-# ============================================================================
-# Tests: Command Execution with Approval
-# ============================================================================
 
 @patch("subprocess.run")
 @patch("shutil.which")
-def test_run_approved_command_succeeds(mock_which, mock_run, temp_plugin_dir):
-    """Execution of approved command succeeds."""
-    mock_which.return_value = "/usr/bin/mkpasswd"
-    mock_run.return_value = MagicMock(returncode=0, stdout="hashed_password", stderr="")
-    
-    manifest = make_manifest(
-        plugin_id="passwd-plugin",
-        commands=[{"name": "mkpasswd", "allow_plugin_specific": True}],
-        actions={
-            "on_write_complete": [
-                {
-                    "id": "hash-password",
-                    "type": "run_command",
-                    "command": ["mkpasswd", "-m", "sha-512", "test"],
-                    "output_var": "password_hash"
-                }
-            ]
-        }
-    )
-    
-    manifest_file = temp_plugin_dir / "passwd-plugin.json"
-    with open(manifest_file, "w") as f:
-        json.dump(manifest, f)
-    
-    # Write approval
-    write_approval(temp_plugin_dir, "passwd-plugin", ["mkpasswd"])
-    
-    plugin = JsonSparkPlug(str(manifest_file))
-    assert plugin.is_available is True
-    
-    # Execute on_write_complete actions
-    action = manifest.get("actions", {}).get("on_write_complete", [])[0]
-    plugin._execute_action(
-        action,
-        ui_values={},
-        preset={"name": "Ubuntu"},
-        device_path="/dev/sdb"
-    )
-    
-    # Verify subprocess was called
-    mock_run.assert_called_once()
-
-
-@patch("shutil.which")
-def test_run_unapproved_command_raises_error(mock_which, temp_plugin_dir):
-    """Execution of unapproved command raises RuntimeError."""
+def test_legacy_approval_file_is_ignored_and_reprompt_required(
+    mock_which, mock_run, temp_plugin_dir
+):
+    """Security reset contract: legacy approvals should not auto-authorize execution."""
     mock_which.return_value = "/usr/bin/proxmox-auto-install-assistant"
-    
+    mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+
     manifest = make_manifest(
-        plugin_id="proxmox-plugin",
+        plugin_id="legacy-reset",
         commands=[{"name": "proxmox-auto-install-assistant", "allow_plugin_specific": True}],
         actions={
             "on_write_complete": [
                 {
-                    "id": "run-proxmox",
+                    "id": "run-assistant",
                     "type": "run_command",
-                    "command": ["proxmox-auto-install-assistant", "--help"]
+                    "command": ["proxmox-auto-install-assistant", "--help"],
                 }
             ]
-        }
+        },
     )
-    
-    manifest_file = temp_plugin_dir / "proxmox-plugin.json"
-    with open(manifest_file, "w") as f:
-        json.dump(manifest, f)
-    
-    # Don't write approval file — command should not be approved
-    
+    manifest_file = write_manifest(temp_plugin_dir, "legacy-reset", manifest)
+    write_legacy_approval(temp_plugin_dir, "legacy-reset", ["proxmox-auto-install-assistant"])
+
     plugin = JsonSparkPlug(str(manifest_file))
-    assert plugin.is_available is True
-    
-    # Try to execute action
     action = manifest["actions"]["on_write_complete"][0]
-    
+
     with pytest.raises(RuntimeError) as exc_info:
-        plugin._execute_action(
-            action,
-            ui_values={},
-            preset={},
-            device_path="/dev/sdb"
-        )
-    
-    assert "not allowed" in str(exc_info.value).lower()
-    assert "proxmox-auto-install-assistant" in str(exc_info.value)
+        plugin._execute_action(action, ui_values={}, preset={}, device_path="/dev/sdb")
+
+    msg = str(exc_info.value).lower()
+    assert "runtime approval" in msg
+    assert "reinstall" not in msg
 
 
 @patch("shutil.which")
-def test_run_unapproved_command_with_helpful_error_message(mock_which, temp_plugin_dir):
-    """Unapproved command error lists approved commands if any exist."""
-    mock_which.return_value = "/usr/bin/unauthorized"
-    
-    manifest = make_manifest(
-        plugin_id="multi-cmd-plugin",
-        commands=[
-            {"name": "cmd1", "allow_plugin_specific": True},
-            {"name": "cmd2", "allow_plugin_specific": True},
-            {"name": "unauthorized", "allow_plugin_specific": True},
-        ],
-        actions={
-            "on_write_complete": [
-                {
-                    "id": "run-unauthorized",
-                    "type": "run_command",
-                    "command": ["unauthorized"]
-                }
-            ]
-        }
-    )
-    
-    manifest_file = temp_plugin_dir / "multi-cmd-plugin.json"
-    with open(manifest_file, "w") as f:
-        json.dump(manifest, f)
-    
-    # Approve only cmd1 and cmd2, not unauthorized
-    write_approval(temp_plugin_dir, "multi-cmd-plugin", ["cmd1", "cmd2"])
-    
-    plugin = JsonSparkPlug(str(manifest_file))
-    action = manifest["actions"]["on_write_complete"][0]
-    
-    with pytest.raises(RuntimeError) as exc_info:
-        plugin._execute_action(
-            action,
-            ui_values={},
-            preset={}
-        )
-    
-    error_msg = str(exc_info.value)
-    assert "unauthorized" in error_msg.lower()
-    assert "cmd1" in error_msg
-    assert "cmd2" in error_msg
-    assert "Approved commands" in error_msg
-
-
-@patch("shutil.which")
-def test_run_unapproved_command_without_prior_approvals(mock_which, temp_plugin_dir):
-    """Unapproved command error when no approvals exist is helpful too."""
+def test_unapproved_command_error_requests_runtime_approval_not_reinstall(
+    mock_which, temp_plugin_dir
+):
+    """Runtime gating message should direct user to approve now, not reinstall."""
     mock_which.return_value = "/usr/bin/some-tool"
-    
+
     manifest = make_manifest(
-        plugin_id="no-approvals-plugin",
+        plugin_id="runtime-approval-msg",
         commands=[{"name": "some-tool", "allow_plugin_specific": True}],
         actions={
             "on_write_complete": [
                 {
                     "id": "run-tool",
                     "type": "run_command",
-                    "command": ["some-tool"]
+                    "command": ["some-tool"],
                 }
             ]
-        }
+        },
     )
-    
-    manifest_file = temp_plugin_dir / "no-approvals-plugin.json"
-    with open(manifest_file, "w") as f:
-        json.dump(manifest, f)
-    
-    # No approval file written
-    
+    manifest_file = write_manifest(temp_plugin_dir, "runtime-approval-msg", manifest)
+
     plugin = JsonSparkPlug(str(manifest_file))
     action = manifest["actions"]["on_write_complete"][0]
-    
-    with pytest.raises(RuntimeError) as exc_info:
-        plugin._execute_action(
-            action,
-            ui_values={},
-            preset={}
-        )
-    
-    error_msg = str(exc_info.value)
-    assert "not allowed" in error_msg.lower()
-    assert "Reinstall the plugin" in error_msg
 
-
-# ============================================================================
-# Tests: Command Not Found vs. Not Approved
-# ============================================================================
-
-@patch("shutil.which")
-def test_command_not_approved_error_before_path_check(mock_which, temp_plugin_dir):
-    """Approval check happens before PATH lookup (better error message)."""
-    mock_which.return_value = None  # Command doesn't exist in PATH
-    
-    manifest = make_manifest(
-        plugin_id="missing-cmd-plugin",
-        commands=[{"name": "missing-tool", "allow_plugin_specific": True}],
-        actions={
-            "on_write_complete": [
-                {
-                    "id": "run-missing",
-                    "type": "run_command",
-                    "command": ["missing-tool"]
-                }
-            ]
-        }
-    )
-    
-    manifest_file = temp_plugin_dir / "missing-cmd-plugin.json"
-    with open(manifest_file, "w") as f:
-        json.dump(manifest, f)
-    
-    # Don't write approval
-    
-    plugin = JsonSparkPlug(str(manifest_file))
-    action = manifest["actions"]["on_write_complete"][0]
-    
     with pytest.raises(RuntimeError) as exc_info:
         plugin._execute_action(action, ui_values={}, preset={})
-    
-    # Should fail on approval, not PATH check
-    assert "not allowed" in str(exc_info.value).lower()
+
+    msg = str(exc_info.value).lower()
+    assert "runtime approval" in msg
+    assert "reinstall" not in msg
 
 
-@patch("subprocess.run")
 @patch("shutil.which")
-def test_approved_command_not_in_path_fails_with_clear_error(
-    mock_which, mock_run, temp_plugin_dir
-):
-    """If command is approved but missing from PATH, error is clear."""
-    # When we call which() first time for approval check, return True
-    # When we call which() again for PATH validation, return False
-    mock_which.side_effect = ["/usr/bin/tool", None]
-    
+def test_on_iso_ready_requires_batch_phase_approval_context(mock_which, temp_plugin_dir):
+    """First denial in a phase should report the full batch of phase commands."""
+    mock_which.return_value = "/usr/bin/tool"
+
     manifest = make_manifest(
-        plugin_id="missing-approved-plugin",
-        commands=[{"name": "missing-approved-tool", "allow_plugin_specific": True}],
-        actions={
-            "on_write_complete": [
-                {
-                    "id": "run-missing-approved",
-                    "type": "run_command",
-                    "command": ["missing-approved-tool"]
-                }
-            ]
-        }
-    )
-    
-    manifest_file = temp_plugin_dir / "missing-approved-plugin.json"
-    with open(manifest_file, "w") as f:
-        json.dump(manifest, f)
-    
-    write_approval(temp_plugin_dir, "missing-approved-plugin", ["missing-approved-tool"])
-    
-    plugin = JsonSparkPlug(str(manifest_file))
-    action = manifest["actions"]["on_write_complete"][0]
-    
-    with pytest.raises(RuntimeError) as exc_info:
-        plugin._execute_action(action, ui_values={}, preset={})
-    
-    # Error should be about PATH, not approval
-    assert "not found in PATH" in str(exc_info.value)
-
-
-# ============================================================================
-# Tests: Approval File Persistence
-# ============================================================================
-
-def test_approval_persists_across_plugin_reloads(temp_plugin_dir):
-    """Approval is maintained when plugin is reloaded."""
-    manifest = make_manifest(
-        plugin_id="persistent-plugin",
-        commands=[{"name": "persistent-cmd", "allow_plugin_specific": True}]
-    )
-    
-    manifest_file = temp_plugin_dir / "persistent-plugin.json"
-    with open(manifest_file, "w") as f:
-        json.dump(manifest, f)
-    
-    write_approval(temp_plugin_dir, "persistent-plugin", ["persistent-cmd"])
-    
-    # First load
-    plugin1 = JsonSparkPlug(str(manifest_file))
-    assert "persistent-cmd" in plugin1._plugin_allowed_commands
-    
-    # Simulate plugin reload
-    plugin2 = JsonSparkPlug(str(manifest_file))
-    assert "persistent-cmd" in plugin2._plugin_allowed_commands
-
-
-# ============================================================================
-# Tests: allow_plugin_specific Flag
-# ============================================================================
-
-def test_command_with_allow_plugin_specific_false_not_in_approval(
-    temp_plugin_dir
-):
-    """Commands with allow_plugin_specific=false should not be in approval."""
-    manifest = make_manifest(
-        plugin_id="mixed-commands-plugin",
+        plugin_id="batch-iso",
         commands=[
-            {"name": "required-tool", "allow_plugin_specific": False},
-            {"name": "optional-tool", "allow_plugin_specific": True},
-        ]
+            {"name": "cmd-a", "allow_plugin_specific": True},
+            {"name": "cmd-b", "allow_plugin_specific": True},
+        ],
+        actions={
+            "on_iso_ready": [
+                {"id": "step-a", "type": "run_command", "command": ["cmd-a", "--x"]},
+                {"id": "step-b", "type": "run_command", "command": ["cmd-b", "--y"]},
+            ]
+        },
     )
-    
-    manifest_file = temp_plugin_dir / "mixed-commands-plugin.json"
-    with open(manifest_file, "w") as f:
-        json.dump(manifest, f)
-    
-    # Simulate install: only allow_plugin_specific=true commands get approved
-    write_approval(temp_plugin_dir, "mixed-commands-plugin", ["optional-tool"])
-    
+    manifest_file = write_manifest(temp_plugin_dir, "batch-iso", manifest)
+
     plugin = JsonSparkPlug(str(manifest_file))
-    assert "optional-tool" in plugin._plugin_allowed_commands
-    assert "required-tool" not in plugin._plugin_allowed_commands
+
+    with pytest.raises(RuntimeError) as exc_info:
+        plugin.on_iso_ready(
+            iso_path="/tmp/test.iso",
+            preset={"id": "demo", "name": "Demo"},
+            ui_values={},
+        )
+
+    msg = str(exc_info.value)
+    assert "phase" in msg.lower()
+    assert "cmd-a" in msg
+    assert "cmd-b" in msg
 
 
-# ============================================================================
-# Tests: Multiple Commands in Single Action
-# ============================================================================
-
-@patch("subprocess.run")
 @patch("shutil.which")
-def test_piped_commands_only_first_checked_for_approval(
-    mock_which, mock_run, temp_plugin_dir
-):
-    """Command approval checks the executable name (first element)."""
-    mock_which.return_value = "/usr/bin/approved-cmd"
-    mock_run.return_value = MagicMock(returncode=0, stdout="result", stderr="")
-    
+def test_runtime_approval_error_exposes_structured_phase_data(mock_which, temp_plugin_dir):
+    mock_which.return_value = "/usr/bin/tool"
+
     manifest = make_manifest(
-        plugin_id="piped-plugin",
-        commands=[{"name": "approved-cmd", "allow_plugin_specific": True}],
+        plugin_id="structured-approval",
+        commands=[{"name": "cmd-a", "allow_plugin_specific": True}],
+        actions={
+            "on_iso_ready": [
+                {"id": "step-a", "type": "run_command", "command": ["cmd-a", "--x"]},
+            ]
+        },
+    )
+    manifest_file = write_manifest(temp_plugin_dir, "structured-approval", manifest)
+
+    plugin = JsonSparkPlug(str(manifest_file))
+
+    with pytest.raises(RuntimeApprovalRequiredError) as exc_info:
+        plugin.on_iso_ready(
+            iso_path="/tmp/test.iso",
+            preset={"id": "demo", "name": "Demo"},
+            ui_values={},
+        )
+
+    err = exc_info.value
+    assert err.plugin_id == "structured-approval"
+    assert err.pending.phase_name == "on_iso_ready"
+    assert err.pending.commands == ["cmd-a"]
+
+
+def test_runtime_approval_is_persisted_and_reloaded_in_user_state(temp_plugin_dir, monkeypatch, tmp_path):
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_dir))
+
+    manifest = make_manifest(plugin_id="persist-approval")
+    manifest_file = write_manifest(temp_plugin_dir, "persist-approval", manifest)
+
+    plugin = JsonSparkPlug(str(manifest_file))
+    plugin.approve_runtime_commands(["cmd-a", "cmd-b", "cmd-a"])
+
+    approval_file = state_dir / "spark-writer" / "approvals" / ".persist-approval.approval"
+    assert approval_file.exists()
+
+    with open(approval_file, "r", encoding="utf-8") as f:
+        approval_data = json.load(f)
+
+    assert approval_data["plugin_id"] == "persist-approval"
+    assert approval_data["approval_model"] == APPROVAL_MODEL_VERSION
+    assert sorted(approval_data["approved_commands"]) == ["cmd-a", "cmd-b"]
+
+    reloaded = JsonSparkPlug(str(manifest_file))
+    assert reloaded._plugin_allowed_commands == {"cmd-a", "cmd-b"}
+
+
+@patch("shutil.which")
+def test_get_pending_phase_approval_returns_commands_for_preflight(mock_which, temp_plugin_dir):
+    mock_which.return_value = "/usr/bin/tool"
+
+    manifest = make_manifest(
+        plugin_id="preflight-check",
+        commands=[{"name": "cmd-a", "allow_plugin_specific": True}],
+        actions={
+            "on_iso_ready": [
+                {"id": "step-a", "type": "run_command", "command": ["cmd-a", "--x"]},
+            ]
+        },
+    )
+    manifest_file = write_manifest(temp_plugin_dir, "preflight-check", manifest)
+
+    plugin = JsonSparkPlug(str(manifest_file))
+    pending = plugin.get_pending_phase_approval("on_iso_ready")
+
+    assert pending is not None
+    assert pending.phase_name == "on_iso_ready"
+    assert pending.commands == ["cmd-a"]
+
+
+def test_post_write_only_plugin_still_supports_local_iso_save(temp_plugin_dir):
+    manifest = make_manifest(
+        plugin_id="local-save-only",
         actions={
             "on_write_complete": [
                 {
-                    "id": "piped-action",
-                    "type": "run_command",
-                    "command": ["approved-cmd", "arg1", "arg2"]
+                    "id": "write-marker",
+                    "type": "write_partition_files",
+                    "partition_label": "CIDATA",
+                    "files": {
+                        "meta-data": "instance-id: demo\n"
+                    },
                 }
             ]
-        }
+        },
     )
-    
-    manifest_file = temp_plugin_dir / "piped-plugin.json"
-    with open(manifest_file, "w") as f:
-        json.dump(manifest, f)
-    
-    write_approval(temp_plugin_dir, "piped-plugin", ["approved-cmd"])
-    
+    manifest_file = write_manifest(temp_plugin_dir, "local-save-only", manifest)
+
     plugin = JsonSparkPlug(str(manifest_file))
-    action = manifest["actions"]["on_write_complete"][0]
-    
-    # Should succeed (first arg is approved)
-    plugin._execute_action(action, ui_values={}, preset={})
-    mock_run.assert_called_once()
+
+    assert plugin.requires_processing() is False
+    assert plugin.supports_save_iso() is True
 
 
-# ============================================================================
-# Integration: Empty Manifest (No Commands)
-# ============================================================================
+def test_missing_template_variable_error_identifies_variable_name(temp_plugin_dir):
+    manifest = make_manifest(plugin_id="template-errors")
+    manifest_file = write_manifest(temp_plugin_dir, "template-errors", manifest)
 
-def test_manifest_with_no_commands_requires_no_approval(temp_plugin_dir):
-    """Plugin with no commands doesn't need an approval file."""
+    plugin = JsonSparkPlug(str(manifest_file))
+    action = {
+        "id": "store-secret",
+        "type": "store_ephemeral_secret",
+        "key": "root-password",
+        "value": "{{_generated_root_password_plaintext}}",
+    }
+
+    with pytest.raises(ValueError) as exc_info:
+        plugin._execute_action(action, ui_values={}, preset={"id": "demo", "name": "Demo"})
+
+    msg = str(exc_info.value)
+    assert msg == "Undefined variable: _generated_root_password_plaintext"
+
+
+@patch("shutil.which")
+def test_on_write_complete_requires_batch_phase_approval_context(mock_which, temp_plugin_dir):
+    """Write-complete phase should surface all pending command approvals at once."""
+    mock_which.return_value = "/usr/bin/tool"
+
     manifest = make_manifest(
-        plugin_id="simple-plugin",
-        commands=[]
+        plugin_id="batch-write",
+        commands=[
+            {"name": "cmd-a", "allow_plugin_specific": True},
+            {"name": "cmd-b", "allow_plugin_specific": True},
+        ],
+        actions={
+            "on_write_complete": [
+                {"id": "step-a", "type": "run_command", "command": ["cmd-a", "--x"]},
+                {"id": "step-b", "type": "run_command", "command": ["cmd-b", "--y"]},
+            ]
+        },
     )
-    
-    manifest_file = temp_plugin_dir / "simple-plugin.json"
-    with open(manifest_file, "w") as f:
-        json.dump(manifest, f)
-    
-    # No approval file
+    manifest_file = write_manifest(temp_plugin_dir, "batch-write", manifest)
+
     plugin = JsonSparkPlug(str(manifest_file))
-    assert plugin.is_available is True
-    assert plugin._plugin_allowed_commands == set()
+
+    with pytest.raises(RuntimeError) as exc_info:
+        plugin.on_write_complete(
+            device_path="/dev/sdb",
+            preset={"id": "demo", "name": "Demo"},
+            ui_values={},
+        )
+
+    msg = str(exc_info.value)
+    assert "phase" in msg.lower()
+    assert "cmd-a" in msg
+    assert "cmd-b" in msg
+
+
+# ---------------------------------------------------------------------------
+# Schema + install-time disclosure contract
+# ---------------------------------------------------------------------------
+
+def test_schema_requires_install_disclosure_fields_for_commands():
+    """Every command should require enough metadata for install-time user disclosure."""
+    schema_path = (
+        PACKAGE_ROOT
+        / "src"
+        / "spark_writer"
+        / "plugins"
+        / "schema"
+        / "sparkplug_manifest.schema.json"
+    )
+
+    with open(schema_path, "r", encoding="utf-8") as f:
+        schema = json.load(f)
+
+    command_schema = schema["properties"]["requires"]["properties"]["commands"]["items"]
+    required = set(command_schema.get("required", []))
+
+    assert "name" in required
+    assert "description" in required
+    assert "install_hint" in required
+    assert "allow_plugin_specific" in required
+
+
+def test_manifest_commands_include_disclosure_metadata(proxmox_manifest):
+    """Install-time command warning UI needs command description and install guidance."""
+    commands = proxmox_manifest.get("requires", {}).get("commands", [])
+
+    assert commands, "Expected at least one command requirement"
+    for cmd in commands:
+        assert cmd.get("name")
+        assert cmd.get("description")
+        assert cmd.get("install_hint")

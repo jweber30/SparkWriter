@@ -1,11 +1,15 @@
 import base64
 import json
 import sys
+import unittest
 from pathlib import Path
 
 import pytest
 
-SigningKey = pytest.importorskip("nacl.signing").SigningKey
+try:
+    from nacl.signing import SigningKey
+except ImportError as exc:  # pragma: no cover - depends on test environment
+    raise unittest.SkipTest("PyNaCl is required for receipt signing tests") from exc
 
 pytestmark = pytest.mark.experimental
 

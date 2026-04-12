@@ -147,12 +147,14 @@ When installing from URL (`spark://plugin/add?...`), Spark Writer applies trust 
 - `file://` and local paths: trusted
 - `localhost`: allowed with confirmation
 - `http://`: blocked by default
-- GitHub-hosted URLs (`raw.githubusercontent.com`, `gist.githubusercontent.com`, `*.github.io`):
+- GitHub-hosted URLs (`github.com`, `raw.githubusercontent.com`, `gist.githubusercontent.com`, `*.github.io`):
     - High-security online authorization is required.
     - `metadata.github_username` must exist.
     - Username derived from URL must match `metadata.github_username`.
     - `metadata.signature.openssh` must verify against one of `https://api.github.com/users/{username}/ssh_signing_keys`.
     - If username cannot be derived and cross-checked, installation is blocked.
+    - If the manifest source is private and returns unauthorized, Spark Writer can prompt for a one-time GitHub token and retry the single download.
+    - Token is used in-memory for that install attempt only.
 - Other `https://` hosts: allowed, but user sees confirmation prompt
 
 Recommended for external distribution:
@@ -279,9 +281,19 @@ Common properties:
 
 Template references use `{{field_id}}`.
 
+Optional UI visibility controls:
+
+- `ui_visibility.when.preset_distro`: show plugin UI only for matching preset distro values
+- `ui_visibility.when.preset_id`: show plugin UI only for matching preset IDs
+
 ### 8. Templates
 
-`templates` is a key-value object where each value is a string template.
+`templates` is a key-value object where each value can be:
+
+- an inline string template
+- an array of lines (joined with newlines)
+- a sidecar file reference: `{ "file": "relative/path" }`
+- an asset reference: `{ "asset": "asset-name" }`
 
 Example:
 
@@ -292,6 +304,10 @@ Example:
 ```
 
 Templates can be consumed by actions like `render_template` and `write_file`.
+
+Compatibility note:
+
+- Template context automatically bridges `apt-cache` and `apt-proxy` keys in either direction for backward compatibility.
 
 ### 9. Lifecycle Hooks And Actions
 
@@ -320,7 +336,17 @@ Useful action fields:
 Compatibility note:
 
 - Runtime may include additional internal action types.
+- Internal/experimental action types currently implemented include `format_yaml_list`, `generate_ephemeral_password`, `store_ephemeral_secret`, and `show_ephemeral_secret_button`.
 - External plugins should target the schema-listed action types above for forward compatibility.
+
+`generate_receipt` supports two modes:
+
+- Signing mode: `signing.private_key` with optional output fields such as signature/hash/public key.
+- Keyed fingerprint mode: `inputs.keyed_fingerprints` for HMAC fingerprints over selected fields.
+
+Receipt dependency note:
+
+- Ed25519 receipt signing requires `pynacl` in the runtime environment.
 
 ### 10. Minimal End-To-End Example
 

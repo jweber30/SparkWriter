@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://metalstrapper.org/schemas/sparkplug-manifest-v1.json",
+  "$id": "https://metalstrapper.net/schemas/sparkplug-manifest-v1.json",
   "title": "SparkPlug Manifest",
   "description": "Declarative JSON manifest for SparkGTK plugins",
   "type": "object",
@@ -78,7 +78,7 @@
           "description": "External commands this plugin invokes",
           "items": {
             "type": "object",
-            "required": ["name"],
+            "required": ["name", "description", "install_hint", "allow_plugin_specific"],
             "properties": {
               "name": {
                 "type": "string",
@@ -189,7 +189,7 @@
           },
           "type": {
             "type": "string",
-            "enum": ["text", "password", "select", "multiline"],
+            "enum": ["text", "password", "select", "multiline", "info"],
             "description": "Input field type"
           },
           "default": {
@@ -213,6 +213,14 @@
             "default": false,
             "description": "Use full-width layout (for multiline)"
           },
+          "standard_field": {
+            "type": "string",
+            "description": "Optional semantic field identifier for cross-plugin orchestration/profile reuse",
+            "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+          },
+          "storage": {
+            "$ref": "#/definitions/storage_hint"
+          },
           "options": {
             "type": "array",
             "description": "Options for select type",
@@ -233,12 +241,18 @@
         }
       }
     },
+    "assets": {
+      "type": "object",
+      "description": "Named sidecar assets that templates or future manifest sections can reference",
+      "additionalProperties": {
+        "$ref": "#/definitions/asset"
+      }
+    },
     "templates": {
       "type": "object",
-      "description": "Named templates for generating scripts/configs",
+      "description": "Named templates for generating scripts/configs. Values may be inline strings, arrays of lines, or references to local sidecar files/assets.",
       "additionalProperties": {
-        "type": "string",
-        "description": "Template string with {{variable}} syntax"
+        "$ref": "#/definitions/template_value"
       }
     },
     "ui_visibility": {
@@ -299,7 +313,11 @@
             "compute_file_hash",
             "create_partition",
             "write_partition_files",
-            "generate_receipt"
+            "generate_receipt",
+            "format_yaml_list",
+            "generate_ephemeral_password",
+            "store_ephemeral_secret",
+            "show_ephemeral_secret_button"
           ],
           "description": "Action type"
         },
@@ -365,6 +383,96 @@
           "description": "Value to compare against (for equals/in operators)"
         }
       }
+    },
+    "asset": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Relative path to a sidecar file stored beside the manifest"
+        },
+        "sha256": {
+          "type": "string",
+          "description": "Optional SHA256 digest for future sidecar integrity verification",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Optional expected size in bytes"
+        },
+        "media_type": {
+          "type": "string",
+          "description": "Optional MIME/media type hint"
+        },
+        "permissions": {
+          "type": "string",
+          "pattern": "^[0-7]{3,4}$",
+          "description": "Optional file mode hint for downstream tooling"
+        }
+      },
+      "additionalProperties": false
+    },
+    "template_value": {
+      "description": "Template value: inline content, line array, direct file reference, or named asset reference",
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "Template string with {{variable}} syntax"
+        },
+        {
+          "type": "array",
+          "description": "Template split into lines for readability",
+          "items": {
+            "type": "string"
+          }
+        },
+        {
+          "type": "object",
+          "required": ["file"],
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Relative sidecar file path beside the manifest"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["asset"],
+          "properties": {
+            "asset": {
+              "type": "string",
+              "description": "Asset name from the manifest assets registry"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "storage_hint": {
+      "type": "object",
+      "description": "Optional persistence hints for hosts/orchestrators",
+      "properties": {
+        "persist": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether the host may persist this value for reuse"
+        },
+        "scope": {
+          "type": "string",
+          "enum": ["user", "workspace", "plugin", "session", "ephemeral"],
+          "description": "Suggested persistence scope"
+        },
+        "secret": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether the value should be treated as sensitive"
+        }
+      },
+      "additionalProperties": false
     }
   }
 }
