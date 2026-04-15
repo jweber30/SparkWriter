@@ -591,6 +591,397 @@ class JsonSparkPlug(SparkPlug):
                 digest.update(chunk)
         return digest.hexdigest()
 
+    def _handle_render_template(
+        self, action: Dict[str, Any], context: Dict[str, Any]
+    ) -> Optional[str]:
+        action_id = action.get('id', 'unknown')
+        template_name = action.get('template')
+        if not template_name:
+            logger.error(f"Action {action_id}: missing template name")
+            return None
+
+        template_value = self.manifest.get('templates', {}).get(template_name)
+        if template_value is None:
+            logger.error(f"Action {action_id}: template '{template_name}' not found")
+            return None
+
+        try:
+            template_str = self._resolve_template_string(template_value)
+        except ValueError as exc:
+            raise RuntimeError(f"Action {action_id}: {exc}") from exc
+
+        result = self.template_engine.render(template_str, context)
+        logger.debug(f"Rendered template {template_name}")
+        return result
+
+    def _handle_write_file(
+        self, action: Dict[str, Any], context: Dict[str, Any]
+    ) -> Optional[str]:
+        content_src = action.get('content', '')
+        path_template = action.get('path', '')
+        permissions = action.get('permissions', '644')
+
+        # Render content (either direct string or variable reference)
+        if content_src.startswith('{{') and content_src.endswith('}}'):
+            var_name = content_src[2:-2].strip()
+            content = context.get(var_name, '')
+        else:
+            content = self.template_engine.render(content_src, context)
+
+        file_path = self.template_engine.render(path_template, context)
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        os.chmod(file_path, int(permissions, 8))
+        logger.info(f"Wrote file: {file_path}")
+        return file_path
+
+    def _handle_run_command(
+        self, action: Dict[str, Any], context: Dict[str, Any]
+    ) -> Optional[str]:
+        cmd_template = action.get('command', [])
+        use_sudo = action.get('sudo', False)
+
+        cmd = [self.template_engine.render(arg, context) for arg in cmd_template]
+
+        # Validate command is allowed (user-approved plugin-specific)
+        cmd_name = cmd[0] if cmd else ''
+        if cmd_name not in self._plugin_allowed_commands:
+            raise self._build_runtime_approval_error(
+                PendingPhaseApproval("current", [cmd_name])
+            )
+
+        if not shutil.which(cmd_name):
+            raise RuntimeError(f"Command '{cmd_name}' not found in PATH")
+
+        # Note: Uses -n (non-interactive) flag for headless operation during autoinstall.
+        # This requires NOPASSWD sudo configuration, which is acceptable because:
+        # 1. Commands are pre-approved by user at plugin install time
+        # 2. The command whitelist + approval system provides security
+        if use_sudo:
+            if not shutil.which('sudo'):
+                raise RuntimeError("sudo is required but not found in PATH")
+            cmd = ['sudo', '-n'] + cmd
+
+        logger.info(f"Running{' (with sudo)' if use_sudo else ''} command")
+        try:
+            proc_result = subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as e:
+            # Provide helpful error message for sudo failures
+            if use_sudo and 'sudo: a password is required' in e.stderr:
+                raise RuntimeError(
+                    f"Command requires passwordless sudo. "
+                    f"Configure NOPASSWD for user in /etc/sudoers or run SparkGTK with sudo."
+                ) from e
+            raise RuntimeError(f"Command failed: {e.stderr}") from e
+
+        # For commands with --output flag, use that as result
+        # This handles tools like proxmox-auto-install-assistant
+        if '--output' in cmd:
+            output_idx = cmd.index('--output')
+            result = cmd[output_idx + 1] if output_idx + 1 < len(cmd) else proc_result.stdout.strip()
+        else:
+            result = proc_result.stdout.strip()
+
+        if proc_result.stderr:
+            logger.debug(f"Command stderr: {proc_result.stderr}")
+        return result
+
+    def _handle_compute_file_hash(
+        self, action: Dict[str, Any], context: Dict[str, Any]
+    ) -> Optional[str]:
+        action_id = action.get('id', 'unknown')
+        path_template = action.get('path')
+        if not path_template:
+            raise RuntimeError(f"Action {action_id}: 'path' is required for compute_file_hash")
+
+        rendered_path = self.template_engine.render(path_template, context)
+        algorithm = str(action.get('algorithm', 'sha256'))
+        hash_value = self._hash_file(Path(rendered_path).expanduser(), algorithm)
+        logger.info(f"Computed {algorithm} hash for {rendered_path}")
+        return hash_value
+
+    def _handle_create_partition(
+        self, action: Dict[str, Any], context: Dict[str, Any]
+    ) -> Optional[str]:
+        action_id = action.get('id', 'unknown')
+        device_path = context.get('device_path')
+        if not device_path:
+            raise RuntimeError("create_partition requires a USB device path")
+
+        label_template = action.get('label')
+        if not label_template:
+            raise RuntimeError(f"Action {action_id}: 'label' is required for create_partition")
+
+        label = self.template_engine.render(label_template, context)
+        rendered_size = self._render_value(action.get('size_mb', 100), context)
+        try:
+            size_mb = int(rendered_size)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Action {action_id}: size_mb must be an integer") from exc
+
+        partition_type = str(self._render_value(action.get('partition_type', '0700'), context))
+        skip_if_exists = bool(action.get('skip_if_exists', True))
+
+        if skip_if_exists and usb_writer.partition_exists(device_path, label):
+            logger.info(f"Partition {label} already present; skipping creation")
+        else:
+            usb_writer.create_aux_partition(
+                device_path,
+                label,
+                size_mb=size_mb,
+                partition_type=partition_type,
+            )
+            logger.info(f"Created partition {label} ({size_mb} MB)")
+        return None
+
+    def _handle_write_partition_files(
+        self, action: Dict[str, Any], context: Dict[str, Any]
+    ) -> Optional[str]:
+        action_id = action.get('id', 'unknown')
+        device_path = context.get('device_path')
+        if not device_path:
+            raise RuntimeError("write_partition_files requires a USB device path")
+
+        label_template = action.get('partition_label')
+        if not label_template:
+            raise RuntimeError(f"Action {action_id}: 'partition_label' is required")
+
+        partition_label = self.template_engine.render(label_template, context)
+        files: Dict[str, str] = {}
+
+        files_var = action.get('files_var')
+        if files_var:
+            bundle = self._action_vars.get(files_var)
+            if not isinstance(bundle, dict):
+                raise RuntimeError(f"Action {action_id}: files_var '{files_var}' not found")
+            files = {str(name): str(content) for name, content in bundle.items()}
+        else:
+            files_spec = action.get('files', {})
+            if not isinstance(files_spec, dict):
+                raise RuntimeError(f"Action {action_id}: 'files' must be an object")
+            for filename, content_template in files_spec.items():
+                rendered_name = self.template_engine.render(str(filename), context)
+                rendered_content = self.template_engine.render(str(content_template), context)
+                files[rendered_name] = rendered_content
+
+        if not files:
+            logger.info(f"No files to write for partition {partition_label}; skipping")
+        else:
+            usb_writer.write_files_to_partition(device_path, partition_label, files)
+            logger.info(f"Wrote {len(files)} file(s) to partition {partition_label}")
+        return None
+
+    def _handle_generate_receipt(
+        self, action: Dict[str, Any], context: Dict[str, Any]
+    ) -> Optional[str]:
+        action_id = action.get('id', 'unknown')
+        signing_spec = action.get('signing', {})
+        private_key_value = signing_spec.get('private_key')
+        if not private_key_value:
+            raise RuntimeError(f"Action {action_id}: signing.private_key is required")
+
+        private_key = str(self._render_value(private_key_value, context))
+        signature_encoding = str(self._render_value(signing_spec.get('encoding', 'base64'), context))
+
+        signing_key = receipt_utils.load_signing_key(private_key)
+        public_key_override = signing_spec.get('public_key')
+        if public_key_override:
+            encoded_public_key = str(self._render_value(public_key_override, context))
+        else:
+            encoded_public_key = receipt_utils.encode_public_key(signing_key, signature_encoding)
+
+        public_key_field = str(signing_spec.get('public_key_field', 'receipt_public_key'))
+
+        identity = self._render_mapping(action.get('identity', {}), context)
+        format_version = str(self._render_value(action.get('format_version', '1.0'), context))
+        identity.setdefault('receipt_format_version', format_version)
+
+        metadata = self.manifest.get('metadata', {})
+        identity.setdefault('sparkplug_id', metadata.get('id', 'unknown'))
+        identity.setdefault('sparkplug_version', metadata.get('version', 'unknown'))
+        identity.setdefault('spark_writer_version', self._spark_writer_version)
+        identity.setdefault(public_key_field, encoded_public_key)
+
+        inputs_spec = action.get('inputs', {})
+        public_inputs = self._render_mapping(inputs_spec.get('public', {}), context)
+
+        redacted_raw = self._render_value(inputs_spec.get('redacted', []), context)
+        if isinstance(redacted_raw, str):
+            redacted_fields = [redacted_raw]
+        elif isinstance(redacted_raw, list):
+            redacted_fields = [str(item) for item in redacted_raw]
+        else:
+            redacted_fields = []
+
+        fingerprints: Dict[str, str] = {}
+        fp_spec = inputs_spec.get('keyed_fingerprints', {})
+        if fp_spec:
+            if 'fields' in fp_spec and 'key' in fp_spec:
+                fingerprint_key = str(self._render_value(fp_spec['key'], context))
+                algorithm = str(fp_spec.get('algorithm', 'sha256'))
+                fp_encoding = str(fp_spec.get('encoding', signature_encoding))
+                fields = fp_spec.get('fields', [])
+                for raw_name in fields:
+                    field_name = str(self._render_value(raw_name, context))
+                    value = public_inputs.get(field_name)
+                    if value is None and field_name in context:
+                        value = context[field_name]
+                    if value is None:
+                        raise RuntimeError(
+                            f"Action {action_id}: cannot fingerprint undefined field '{field_name}'"
+                        )
+                    fingerprints[field_name] = receipt_utils.hmac_fingerprint(
+                        fingerprint_key,
+                        str(value),
+                        algorithm=algorithm,
+                        encoding=fp_encoding,
+                    )
+            else:
+                fingerprints = self._render_mapping(fp_spec.get('values', {}), context)
+
+        inputs_section: Dict[str, Any] = {}
+        if public_inputs:
+            inputs_section['public'] = public_inputs
+        if redacted_fields:
+            inputs_section['redacted'] = redacted_fields
+        if fingerprints:
+            inputs_section['keyed_fingerprints'] = fingerprints
+
+        artifacts = self._render_mapping(action.get('artifacts', {}), context)
+
+        run_metadata = self._render_mapping(action.get('run_metadata', {}), context)
+        if 'timestamp' not in run_metadata:
+            run_metadata['timestamp'] = receipt_utils.current_timestamp()
+
+        if 'nonce' not in run_metadata:
+            raw_nonce_bytes = self._render_value(action.get('nonce_bytes', 16), context)
+            try:
+                nonce_bytes = int(raw_nonce_bytes)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"Action {action_id}: nonce_bytes must be an integer") from exc
+            nonce_encoding = str(self._render_value(action.get('nonce_encoding', 'hex'), context))
+            run_metadata['nonce'] = receipt_utils.generate_nonce(nonce_bytes, nonce_encoding)
+
+        chain_section = self._render_mapping(action.get('chain', {}), context)
+
+        receipt_payload: Dict[str, Any] = {
+            'identity': identity,
+            'artifacts': artifacts,
+            'run_metadata': run_metadata,
+        }
+        if inputs_section:
+            receipt_payload['inputs'] = inputs_section
+        if chain_section:
+            receipt_payload['chain'] = chain_section
+
+        canonical_json = receipt_utils.canonicalize_receipt(receipt_payload)
+        receipt_hash = receipt_utils.compute_receipt_hash(canonical_json)
+        signature = receipt_utils.sign_with_key(signing_key, canonical_json, encoding=signature_encoding)
+
+        receipt_filename = str(self._render_value(action.get('receipt_filename', 'receipt.json'), context))
+        signature_filename = str(self._render_value(action.get('signature_filename', 'receipt.sig'), context))
+
+        files_bundle = {
+            receipt_filename: canonical_json,
+            signature_filename: signature,
+        }
+
+        json_var = action.get('json_output_var')
+        if json_var:
+            self._action_vars[json_var] = canonical_json
+
+        signature_var = action.get('signature_output_var')
+        if signature_var:
+            self._action_vars[signature_var] = signature
+
+        hash_var = action.get('hash_output_var')
+        if hash_var:
+            self._action_vars[hash_var] = receipt_hash
+
+        files_var_name = action.get('files_output_var') or signing_spec.get('files_output_var')
+        if files_var_name:
+            self._action_vars[files_var_name] = files_bundle
+
+        public_key_var = action.get('public_key_output_var') or signing_spec.get('public_key_output_var')
+        if public_key_var:
+            self._action_vars[public_key_var] = encoded_public_key
+
+        logger.info(f"Generated receipt payload ({len(canonical_json)} bytes)")
+        return canonical_json
+
+    def _handle_format_yaml_list(
+        self, action: Dict[str, Any], context: Dict[str, Any]
+    ) -> Optional[str]:
+        # Convert newline or space-separated list to YAML list format
+        input_str = self.template_engine.render(action.get('input', ''), context)
+        default_str = action.get('default', '')
+        indent = action.get('indent', 0)
+
+        if not input_str.strip() and default_str:
+            input_str = default_str
+
+        if '\n' in input_str:
+            items = [line.strip() for line in input_str.split('\n') if line.strip()]
+        else:
+            items = [item.strip() for item in input_str.split() if item.strip()]
+
+        yaml_lines = [f"{' ' * indent}- {item}" for item in items]
+        result = '\n'.join(yaml_lines)
+        logger.info(f"Formatted {len(items)} items as YAML list")
+        return result
+
+    def _handle_generate_ephemeral_password(
+        self, action: Dict[str, Any], context: Dict[str, Any]
+    ) -> Optional[str]:
+        # Use cryptographically secure random generation for one-time secrets.
+        action_id = action.get('id', 'unknown')
+        raw_length = self._render_value(action.get('length', 20), context)
+        try:
+            length = int(raw_length)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"Action {action_id}: length must be an integer") from exc
+        if length < 1:
+            raise RuntimeError(f"Action {action_id}: length must be >= 1")
+
+        charset = action.get('charset')
+        if charset:
+            charset = str(self._render_value(charset, context))
+        else:
+            charset = string.ascii_letters + string.digits + "!@#$%^&*()-_=+"
+        if not charset:
+            raise RuntimeError(f"Action {action_id}: charset must not be empty")
+
+        result = ''.join(secrets.choice(charset) for _ in range(length))
+        logger.info(f"Generated ephemeral password ({length} chars)")
+        return result
+
+    def _handle_store_ephemeral_secret(
+        self, action: Dict[str, Any], context: Dict[str, Any]
+    ) -> Optional[str]:
+        # Store secret in memory (cleared on app exit)
+        key = action.get('key')
+        value = self.template_engine.render(action.get('value', ''), context)
+        if key:
+            self._ephemeral_secrets[key] = value
+            logger.info(f"Stored ephemeral secret")
+        return None
+
+    def _handle_show_ephemeral_secret_button(
+        self, action: Dict[str, Any], context: Dict[str, Any]
+    ) -> Optional[str]:
+        # This is handled by the UI layer after write completes
+        # Just validate the action has required fields
+        key = action.get('key')
+        if key not in self._ephemeral_secrets:
+            logger.warning(f"Ephemeral secret not found")
+        return None
+
     def _execute_action(
         self,
         action: Dict[str, Any],
@@ -613,7 +1004,7 @@ class JsonSparkPlug(SparkPlug):
         """
         action_id = action.get('id', 'unknown')
         action_type = action.get('type')
-        
+
         # Check condition
         condition = action.get('when')
         if condition and not self._evaluate_condition(condition, ui_values):
@@ -639,385 +1030,26 @@ class JsonSparkPlug(SparkPlug):
                 event_type=PluginEventType.UPDATE,
             )
 
-        result = None
-
-        if action_type == 'render_template':
-            template_name = action.get('template')
-            if not template_name:
-                logger.error(f"Action {action_id}: missing template name")
-                return None
-
-            template_value = self.manifest.get('templates', {}).get(template_name)
-            if template_value is None:
-                logger.error(f"Action {action_id}: template '{template_name}' not found")
-                return None
-
-            try:
-                template_str = self._resolve_template_string(template_value)
-            except ValueError as exc:
-                raise RuntimeError(f"Action {action_id}: {exc}") from exc
-
-            result = self.template_engine.render(template_str, context)
-            logger.debug(f"Rendered template {template_name}")
-
-        elif action_type == 'write_file':
-            content_src = action.get('content', '')
-            path_template = action.get('path', '')
-            permissions = action.get('permissions', '644')
-
-            # Render content (either direct string or variable reference)
-            if content_src.startswith('{{') and content_src.endswith('}}'):
-                var_name = content_src[2:-2].strip()
-                content = context.get(var_name, '')
-            else:
-                content = self.template_engine.render(content_src, context)
-
-            # Render path
-            file_path = self.template_engine.render(path_template, context)
-
-            # Write file
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(content)
-
-            # Set permissions
-            os.chmod(file_path, int(permissions, 8))
-            result = file_path
-            logger.info(f"Wrote file: {file_path}")
-
-        elif action_type == 'run_command':
-            cmd_template = action.get('command', [])
-            use_sudo = action.get('sudo', False)
-
-            # Render command arguments
-            cmd = [self.template_engine.render(arg, context) for arg in cmd_template]
-
-            # Validate command is allowed (user-approved plugin-specific)
-            cmd_name = cmd[0] if cmd else ''
-            if cmd_name not in self._plugin_allowed_commands:
-                raise self._build_runtime_approval_error(
-                    PendingPhaseApproval("current", [cmd_name])
-                )
-
-            # Check if command exists
-            if not shutil.which(cmd_name):
-                raise RuntimeError(f"Command '{cmd_name}' not found in PATH")
-
-            # Add sudo if requested
-            # Note: Uses -n (non-interactive) flag for headless operation during autoinstall.
-            # This requires NOPASSWD sudo configuration, which is acceptable because:
-            # 1. Commands are pre-approved by user at plugin install time
-            # 2. The command whitelist + approval system provides security
-            if use_sudo:
-                if not shutil.which('sudo'):
-                    raise RuntimeError("sudo is required but not found in PATH")
-                cmd = ['sudo', '-n'] + cmd
-
-            # Execute
-            logger.info(f"Running{' (with sudo)' if use_sudo else ''} command")
-            try:
-                proc_result = subprocess.run(
-                    cmd,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            except subprocess.CalledProcessError as e:
-                # Provide helpful error message for sudo failures
-                if use_sudo and 'sudo: a password is required' in e.stderr:
-                    raise RuntimeError(
-                        f"Command requires passwordless sudo. "
-                        f"Configure NOPASSWD for user in /etc/sudoers or run SparkGTK with sudo."
-                    ) from e
-                raise RuntimeError(f"Command failed: {e.stderr}") from e
-
-            # For commands with --output flag, use that as result
-            # This handles tools like proxmox-auto-install-assistant
-            if '--output' in cmd:
-                output_idx = cmd.index('--output')
-                if output_idx + 1 < len(cmd):
-                    result = cmd[output_idx + 1]
-                else:
-                    result = proc_result.stdout.strip()
-            else:
-                result = proc_result.stdout.strip()
-
-            if proc_result.stderr:
-                logger.debug(f"Command stderr: {proc_result.stderr}")
-
-        elif action_type == 'compute_file_hash':
-            path_template = action.get('path')
-            if not path_template:
-                raise RuntimeError(f"Action {action_id}: 'path' is required for compute_file_hash")
-
-            rendered_path = self.template_engine.render(path_template, context)
-            algorithm = str(action.get('algorithm', 'sha256'))
-            hash_value = self._hash_file(Path(rendered_path).expanduser(), algorithm)
-
-            output_var = action.get('output_var')
-            if output_var:
-                self._action_vars[output_var] = hash_value
-            result = hash_value
-            logger.info(f"Computed {algorithm} hash for {rendered_path}")
-
-        elif action_type == 'create_partition':
-            if not device_path:
-                raise RuntimeError("create_partition requires a USB device path")
-
-            label_template = action.get('label')
-            if not label_template:
-                raise RuntimeError(f"Action {action_id}: 'label' is required for create_partition")
-
-            label = self.template_engine.render(label_template, context)
-            rendered_size = self._render_value(action.get('size_mb', 100), context)
-            try:
-                size_mb = int(rendered_size)
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError(f"Action {action_id}: size_mb must be an integer") from exc
-
-            partition_type = str(self._render_value(action.get('partition_type', '0700'), context))
-            skip_if_exists = bool(action.get('skip_if_exists', True))
-
-            if skip_if_exists and usb_writer.partition_exists(device_path, label):
-                logger.info(f"Partition {label} already present; skipping creation")
-            else:
-                usb_writer.create_aux_partition(
-                    device_path,
-                    label,
-                    size_mb=size_mb,
-                    partition_type=partition_type,
-                )
-                logger.info(f"Created partition {label} ({size_mb} MB)")
-
-        elif action_type == 'write_partition_files':
-            if not device_path:
-                raise RuntimeError("write_partition_files requires a USB device path")
-
-            label_template = action.get('partition_label')
-            if not label_template:
-                raise RuntimeError(f"Action {action_id}: 'partition_label' is required")
-
-            partition_label = self.template_engine.render(label_template, context)
-            files: Dict[str, str] = {}
-
-            files_var = action.get('files_var')
-            if files_var:
-                bundle = self._action_vars.get(files_var)
-                if not isinstance(bundle, dict):
-                    raise RuntimeError(f"Action {action_id}: files_var '{files_var}' not found")
-                files = {str(name): str(content) for name, content in bundle.items()}
-            else:
-                files_spec = action.get('files', {})
-                if not isinstance(files_spec, dict):
-                    raise RuntimeError(f"Action {action_id}: 'files' must be an object")
-                for filename, content_template in files_spec.items():
-                    rendered_name = self.template_engine.render(str(filename), context)
-                    rendered_content = self.template_engine.render(str(content_template), context)
-                    files[rendered_name] = rendered_content
-
-            if not files:
-                logger.info(f"No files to write for partition {partition_label}; skipping")
-            else:
-                usb_writer.write_files_to_partition(device_path, partition_label, files)
-                logger.info(f"Wrote {len(files)} file(s) to partition {partition_label}")
-
-        elif action_type == 'generate_receipt':
-            signing_spec = action.get('signing', {})
-            private_key_value = signing_spec.get('private_key')
-            if not private_key_value:
-                raise RuntimeError(f"Action {action_id}: signing.private_key is required")
-
-            private_key = str(self._render_value(private_key_value, context))
-            signature_encoding = str(self._render_value(signing_spec.get('encoding', 'base64'), context))
-
-            signing_key = receipt_utils.load_signing_key(private_key)
-            public_key_override = signing_spec.get('public_key')
-            if public_key_override:
-                encoded_public_key = str(self._render_value(public_key_override, context))
-            else:
-                encoded_public_key = receipt_utils.encode_public_key(signing_key, signature_encoding)
-
-            public_key_field = str(signing_spec.get('public_key_field', 'receipt_public_key'))
-
-            identity = self._render_mapping(action.get('identity', {}), context)
-            format_version = str(self._render_value(action.get('format_version', '1.0'), context))
-            identity.setdefault('receipt_format_version', format_version)
-
-            metadata = self.manifest.get('metadata', {})
-            identity.setdefault('sparkplug_id', metadata.get('id', 'unknown'))
-            identity.setdefault('sparkplug_version', metadata.get('version', 'unknown'))
-            identity.setdefault('spark_writer_version', self._spark_writer_version)
-            identity.setdefault(public_key_field, encoded_public_key)
-
-            inputs_spec = action.get('inputs', {})
-            public_inputs = self._render_mapping(inputs_spec.get('public', {}), context)
-
-            redacted_raw = self._render_value(inputs_spec.get('redacted', []), context)
-            if isinstance(redacted_raw, str):
-                redacted_fields = [redacted_raw]
-            elif isinstance(redacted_raw, list):
-                redacted_fields = [str(item) for item in redacted_raw]
-            else:
-                redacted_fields = []
-
-            fingerprints: Dict[str, str] = {}
-            fp_spec = inputs_spec.get('keyed_fingerprints', {})
-            if fp_spec:
-                if 'fields' in fp_spec and 'key' in fp_spec:
-                    fingerprint_key = str(self._render_value(fp_spec['key'], context))
-                    algorithm = str(fp_spec.get('algorithm', 'sha256'))
-                    fp_encoding = str(fp_spec.get('encoding', signature_encoding))
-                    fields = fp_spec.get('fields', [])
-                    for raw_name in fields:
-                        field_name = str(self._render_value(raw_name, context))
-                        value = public_inputs.get(field_name)
-                        if value is None and field_name in context:
-                            value = context[field_name]
-                        if value is None:
-                            raise RuntimeError(
-                                f"Action {action_id}: cannot fingerprint undefined field '{field_name}'"
-                            )
-                        fingerprints[field_name] = receipt_utils.hmac_fingerprint(
-                            fingerprint_key,
-                            str(value),
-                            algorithm=algorithm,
-                            encoding=fp_encoding,
-                        )
-                else:
-                    fingerprints = self._render_mapping(fp_spec.get('values', {}), context)
-
-            inputs_section: Dict[str, Any] = {}
-            if public_inputs:
-                inputs_section['public'] = public_inputs
-            if redacted_fields:
-                inputs_section['redacted'] = redacted_fields
-            if fingerprints:
-                inputs_section['keyed_fingerprints'] = fingerprints
-
-            artifacts = self._render_mapping(action.get('artifacts', {}), context)
-
-            run_metadata = self._render_mapping(action.get('run_metadata', {}), context)
-            if 'timestamp' not in run_metadata:
-                run_metadata['timestamp'] = receipt_utils.current_timestamp()
-
-            if 'nonce' not in run_metadata:
-                raw_nonce_bytes = self._render_value(action.get('nonce_bytes', 16), context)
-                try:
-                    nonce_bytes = int(raw_nonce_bytes)
-                except (TypeError, ValueError) as exc:
-                    raise RuntimeError(f"Action {action_id}: nonce_bytes must be an integer") from exc
-                nonce_encoding = str(self._render_value(action.get('nonce_encoding', 'hex'), context))
-                run_metadata['nonce'] = receipt_utils.generate_nonce(nonce_bytes, nonce_encoding)
-
-            chain_section = self._render_mapping(action.get('chain', {}), context)
-
-            receipt_payload: Dict[str, Any] = {
-                'identity': identity,
-                'artifacts': artifacts,
-                'run_metadata': run_metadata,
-            }
-            if inputs_section:
-                receipt_payload['inputs'] = inputs_section
-            if chain_section:
-                receipt_payload['chain'] = chain_section
-
-            canonical_json = receipt_utils.canonicalize_receipt(receipt_payload)
-            receipt_hash = receipt_utils.compute_receipt_hash(canonical_json)
-            signature = receipt_utils.sign_with_key(signing_key, canonical_json, encoding=signature_encoding)
-
-            receipt_filename = str(self._render_value(action.get('receipt_filename', 'receipt.json'), context))
-            signature_filename = str(self._render_value(action.get('signature_filename', 'receipt.sig'), context))
-
-            files_bundle = {
-                receipt_filename: canonical_json,
-                signature_filename: signature,
-            }
-
-            json_var = action.get('json_output_var')
-            if json_var:
-                self._action_vars[json_var] = canonical_json
-
-            signature_var = action.get('signature_output_var')
-            if signature_var:
-                self._action_vars[signature_var] = signature
-
-            hash_var = action.get('hash_output_var')
-            if hash_var:
-                self._action_vars[hash_var] = receipt_hash
-
-            files_var_name = action.get('files_output_var') or signing_spec.get('files_output_var')
-            if files_var_name:
-                self._action_vars[files_var_name] = files_bundle
-
-            public_key_var = action.get('public_key_output_var') or signing_spec.get('public_key_output_var')
-            if public_key_var:
-                self._action_vars[public_key_var] = encoded_public_key
-
-            result = canonical_json
-            logger.info(f"Generated receipt payload ({len(canonical_json)} bytes)")
-
-        elif action_type == 'format_yaml_list':
-            # Convert newline or space-separated list to YAML list format
-            input_str = self.template_engine.render(action.get('input', ''), context)
-            default_str = action.get('default', '')
-            indent = action.get('indent', 0)
-
-            # Use default if input is empty
-            if not input_str.strip() and default_str:
-                input_str = default_str
-
-            # Parse items (newline or space-separated)
-            if '\n' in input_str:
-                items = [line.strip() for line in input_str.split('\n') if line.strip()]
-            else:
-                items = [item.strip() for item in input_str.split() if item.strip()]
-
-            # Format as YAML list
-            yaml_lines = [f"{' ' * indent}- {item}" for item in items]
-            result = '\n'.join(yaml_lines)
-            logger.info(f"Formatted {len(items)} items as YAML list")
-
-        elif action_type == 'generate_ephemeral_password':
-            # Use cryptographically secure random generation for one-time secrets.
-            raw_length = self._render_value(action.get('length', 20), context)
-            try:
-                length = int(raw_length)
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError(f"Action {action_id}: length must be an integer") from exc
-            if length < 1:
-                raise RuntimeError(f"Action {action_id}: length must be >= 1")
-
-            charset = action.get('charset')
-            if charset:
-                charset = str(self._render_value(charset, context))
-            else:
-                charset = string.ascii_letters + string.digits + "!@#$%^&*()-_=+"
-            if not charset:
-                raise RuntimeError(f"Action {action_id}: charset must not be empty")
-
-            result = ''.join(secrets.choice(charset) for _ in range(length))
-            logger.info(f"Generated ephemeral password ({length} chars)")
-
-        elif action_type == 'store_ephemeral_secret':
-            # Store secret in memory (cleared on app exit)
-            key = action.get('key')
-            value = self.template_engine.render(action.get('value', ''), context)
-            if key:
-                self._ephemeral_secrets[key] = value
-                logger.info(f"Stored ephemeral secret")
-            result = None
-
-        elif action_type == 'show_ephemeral_secret_button':
-            # This is handled by the UI layer after write completes
-            # Just validate the action has required fields
-            key = action.get('key')
-            if key not in self._ephemeral_secrets:
-                logger.warning(f"Ephemeral secret not found")
-            result = None
-
-        else:
+        _dispatch = {
+            'render_template':             self._handle_render_template,
+            'write_file':                  self._handle_write_file,
+            'run_command':                 self._handle_run_command,
+            'compute_file_hash':           self._handle_compute_file_hash,
+            'create_partition':            self._handle_create_partition,
+            'write_partition_files':       self._handle_write_partition_files,
+            'generate_receipt':            self._handle_generate_receipt,
+            'format_yaml_list':            self._handle_format_yaml_list,
+            'generate_ephemeral_password': self._handle_generate_ephemeral_password,
+            'store_ephemeral_secret':      self._handle_store_ephemeral_secret,
+            'show_ephemeral_secret_button': self._handle_show_ephemeral_secret_button,
+        }
+
+        handler = _dispatch.get(action_type)
+        if not handler:
             logger.warning(f"Unknown action type: {action_type}")
             return None
+
+        result = handler(action, context)
 
         # Store result in action variables if requested
         output_var = action.get('output_var')

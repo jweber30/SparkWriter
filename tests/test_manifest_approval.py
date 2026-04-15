@@ -299,6 +299,29 @@ def test_post_write_only_plugin_still_supports_local_iso_save(temp_plugin_dir):
     assert plugin.supports_save_iso() is True
 
 
+def test_built_in_ubuntu_live_persistence_plugin_supports_local_iso_save(
+    ubuntu_live_persistence_plugin,
+):
+    assert ubuntu_live_persistence_plugin.requires_processing() is False
+    assert ubuntu_live_persistence_plugin.supports_save_iso() is True
+
+
+def test_built_in_ubuntu_live_persistence_plugin_has_no_runtime_command_approval(
+    ubuntu_live_persistence_plugin,
+):
+    pending = ubuntu_live_persistence_plugin.get_pending_phase_approval("on_write_complete")
+
+    assert pending is None
+
+
+def test_proxmox_wrapper_participates_in_phase_approval(proxmox_plugin):
+    pending = proxmox_plugin.get_pending_phase_approval("on_iso_ready")
+
+    assert pending is not None
+    assert pending.phase_name == "on_iso_ready"
+    assert pending.commands == ["proxmox-auto-install-assistant"]
+
+
 def test_missing_template_variable_error_identifies_variable_name(temp_plugin_dir):
     manifest = make_manifest(plugin_id="template-errors")
     manifest_file = write_manifest(temp_plugin_dir, "template-errors", manifest)
@@ -315,7 +338,7 @@ def test_missing_template_variable_error_identifies_variable_name(temp_plugin_di
         plugin._execute_action(action, ui_values={}, preset={"id": "demo", "name": "Demo"})
 
     msg = str(exc_info.value)
-    assert msg == "Undefined variable: _generated_root_password_plaintext"
+    assert msg == "'_generated_root_password_plaintext' is undefined"
 
 
 @patch("shutil.which")

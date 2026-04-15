@@ -488,6 +488,8 @@ class SparkApplication(Adw.Application):
 
 
 def main():
+    from usb_writer_core.preflight import enforce_preflight
+    enforce_preflight()
     app = SparkApplication()
     return app.run(sys.argv)
 

@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://metalstrapper.net/schemas/sparkplug-manifest-v1.json",
   "title": "SparkPlug Manifest",
-  "description": "Declarative JSON manifest for SparkGTK plugins",
+  "description": "SparkPlug manifests target SparkWriter running in a freshly provisioned Crostini environment. External command dependencies are expected to be satisfiable via apt-compatible Debian packages unless otherwise noted.",
   "type": "object",
   "required": ["version", "metadata", "requires"],
   "properties": {
@@ -82,7 +82,7 @@
             "properties": {
               "name": {
                 "type": "string",
-                "description": "Command name (e.g., 'xorriso', 'proxmox-auto-install-assistant')"
+                "description": "Command name (e.g., 'proxmox-auto-install-assistant')"
               },
               "description": {
                 "type": "string",
@@ -309,7 +309,6 @@
           "enum": [
             "render_template",
             "run_command",
-            "write_file",
             "compute_file_hash",
             "create_partition",
             "write_partition_files",
@@ -317,7 +316,10 @@
             "format_yaml_list",
             "generate_ephemeral_password",
             "store_ephemeral_secret",
-            "show_ephemeral_secret_button"
+            "show_ephemeral_secret_button",
+            "create_artifact",
+            "prepare_proxmox_auto_install_iso",
+            "prepare_ubuntu_nocloud_iso"
           ],
           "description": "Action type"
         },
@@ -343,18 +345,62 @@
           "default": false,
           "description": "Run command with sudo using -n (non-interactive) flag. Requires passwordless sudo configuration (NOPASSWD in /etc/sudoers). Used for autoinstall workflows that cannot prompt for passwords."
         },
+        "artifact_id": {
+          "type": "string",
+          "description": "Unique runtime artifact identifier for create_artifact"
+        },
         "content": {
           "type": "string",
-          "description": "File content or {{variable}} reference (for write_file)"
+          "description": "Inline text content for create_artifact"
         },
-        "path": {
+        "content_var": {
           "type": "string",
-          "description": "File path with {{variable}} substitution (for write_file)"
+          "description": "Existing action output variable to store as artifact content"
         },
-        "permissions": {
+        "kind": {
           "type": "string",
-          "pattern": "^[0-7]{3,4}$",
-          "description": "Octal file permissions (e.g., '755')"
+          "description": "Logical artifact kind such as config, script, or cloud_init"
+        },
+        "logical_name": {
+          "type": "string",
+          "description": "Logical filename used when the host materializes an artifact"
+        },
+        "media_type": {
+          "type": "string",
+          "description": "Optional media type hint for an artifact"
+        },
+        "executable": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether a materialized artifact should be executable"
+        },
+        "iso_path": {
+          "type": "string",
+          "description": "Source ISO path for host-owned ISO preparation actions"
+        },
+        "output_path": {
+          "type": "string",
+          "description": "Destination ISO path for host-owned ISO preparation actions"
+        },
+        "answer_artifact": {
+          "type": "string",
+          "description": "Artifact id for the Proxmox answer file"
+        },
+        "firstboot_artifact": {
+          "type": "string",
+          "description": "Optional artifact id for the Proxmox first-boot script"
+        },
+        "user_data_artifact": {
+          "type": "string",
+          "description": "Artifact id for Ubuntu NoCloud user-data"
+        },
+        "meta_data_artifact": {
+          "type": "string",
+          "description": "Artifact id for Ubuntu NoCloud meta-data"
+        },
+        "volume_label": {
+          "type": "string",
+          "description": "Optional output ISO volume label"
         },
         "emit_event": {
           "type": "object",

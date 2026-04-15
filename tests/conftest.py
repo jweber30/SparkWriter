@@ -25,6 +25,36 @@ def proxmox_manifest_path():
 
 
 @pytest.fixture
+def ubuntu_live_persistence_manifest_path():
+    """Return path to the built-in Ubuntu live persistence manifest."""
+    manifest_path = (
+        SRC_ROOT
+        / "spark_writer"
+        / "plugins"
+        / "installed"
+        / "ubuntu-live-persistence.json"
+    )
+    if not manifest_path.exists():
+        pytest.skip("Ubuntu live persistence manifest not found in installed plugins")
+    return manifest_path
+
+
+@pytest.fixture
+def ubuntu_autoinstall_manifest_path():
+    """Return path to the built-in Ubuntu autoinstall manifest."""
+    manifest_path = (
+        SRC_ROOT
+        / "spark_writer"
+        / "plugins"
+        / "installed"
+        / "ubuntu-autoinstall.json"
+    )
+    if not manifest_path.exists():
+        pytest.skip("Ubuntu autoinstall manifest not found in installed plugins")
+    return manifest_path
+
+
+@pytest.fixture
 def proxmox_manifest(proxmox_manifest_path):
     """Load the Proxmox Tailscale test manifest as a dict."""
     with open(proxmox_manifest_path) as f:
@@ -32,12 +62,28 @@ def proxmox_manifest(proxmox_manifest_path):
 
 
 @pytest.fixture
-def proxmox_plugin(proxmox_manifest_path, tmp_path):
+def ubuntu_live_persistence_manifest(ubuntu_live_persistence_manifest_path):
+    """Load the built-in Ubuntu live persistence manifest as a dict."""
+    with open(ubuntu_live_persistence_manifest_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+@pytest.fixture
+def ubuntu_autoinstall_manifest(ubuntu_autoinstall_manifest_path):
+    """Load the built-in Ubuntu autoinstall manifest as a dict."""
+    with open(ubuntu_autoinstall_manifest_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+@pytest.fixture
+def proxmox_plugin(proxmox_manifest_path, tmp_path, monkeypatch):
     """Create a JsonSparkPlug instance from the Proxmox manifest.
 
     This fixture intentionally does not pre-seed command approvals.
     Invocation-time approval behavior should be controlled by each test.
     """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
     # Copy manifest and any sidecar files to temp dir (simulating installation)
     temp_manifest = tmp_path / "proxmox-tailscale.json"
     temp_manifest.write_text(proxmox_manifest_path.read_text())
@@ -47,6 +93,34 @@ def proxmox_plugin(proxmox_manifest_path, tmp_path):
     for sidecar in manifest_dir.iterdir():
         if sidecar.is_file() and sidecar.suffix != ".json" and sidecar.name.startswith(stem):
             shutil.copy(sidecar, tmp_path / sidecar.name)
+
+    return JsonSparkPlug(str(temp_manifest))
+
+
+@pytest.fixture
+def ubuntu_live_persistence_plugin(ubuntu_live_persistence_manifest_path, tmp_path, monkeypatch):
+    """Create a JsonSparkPlug instance from the Ubuntu live persistence manifest."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+    temp_manifest = tmp_path / "ubuntu-live-persistence.json"
+    temp_manifest.write_text(
+        ubuntu_live_persistence_manifest_path.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    return JsonSparkPlug(str(temp_manifest))
+
+
+@pytest.fixture
+def ubuntu_autoinstall_plugin(ubuntu_autoinstall_manifest_path, tmp_path, monkeypatch):
+    """Create a JsonSparkPlug instance from the Ubuntu autoinstall manifest."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+    temp_manifest = tmp_path / "ubuntu-autoinstall.json"
+    temp_manifest.write_text(
+        ubuntu_autoinstall_manifest_path.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
 
     return JsonSparkPlug(str(temp_manifest))
 

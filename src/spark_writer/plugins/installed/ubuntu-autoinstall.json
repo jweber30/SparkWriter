@@ -13,6 +13,7 @@
         "name": "mkpasswd",
         "package": "whois",
         "description": "Generate password hashes for autoinstall workflows",
+        "install_hint": "Install the whois package to provide mkpasswd",
         "allow_plugin_specific": true
       }
     ]
@@ -75,9 +76,7 @@
   ],
   "templates": {
     "user_data": "#cloud-config\nautoinstall:\n  version: 1\n  identity:\n    hostname: {{hostname}}\n    username: {{username}}\n    password: {{_generated_password_hash}}\n  user-data:\n    hostname: {{hostname}}\n    fqdn: {{hostname}}.local\n    timezone: {{timezone}}\n    users:\n      - name: {{username}}\n        groups: [sudo, docker]\n        shell: /bin/bash\n        sudo: 'ALL=(ALL) NOPASSWD:ALL'\n        passwd: {{_generated_password_hash}}\n        lock_passwd: false\n        ssh_authorized_keys:\n{{_ssh_keys_yaml}}\n    package_update: true\n    package_upgrade: true\n    packages:\n{{_packages_yaml}}\n    final_message: \"Ubuntu autoinstall complete. Hostname: {{hostname}}\"\n",
-    "meta_data": "instance-id: ubuntu-autoinstall-{{hostname}}\nlocal-hostname: {{hostname}}\n",
-    "grub_patch_pattern": "(linux\\s+/casper/vmlinuz)\\s+(---)",
-    "grub_patch_replacement": "\\1 autoinstall \"ds=nocloud;s=/cdrom/nocloud/\" \\2"
+    "meta_data": "instance-id: ubuntu-autoinstall-{{hostname}}\nlocal-hostname: {{hostname}}\n"
   },
   "actions": {
     "on_iso_ready": [
@@ -139,6 +138,19 @@
         }
       },
       {
+        "id": "create_user_data_artifact",
+        "type": "create_artifact",
+        "artifact_id": "user_data",
+        "content_var": "user_data_content",
+        "kind": "cloud_init",
+        "logical_name": "user-data",
+        "media_type": "text/cloud-config",
+        "emit_event": {
+          "message": "Registering cloud-init user-data artifact",
+          "progress": 55
+        }
+      },
+      {
         "id": "render_meta_data",
         "type": "render_template",
         "template": "meta_data",
@@ -149,27 +161,24 @@
         }
       },
       {
+        "id": "create_meta_data_artifact",
+        "type": "create_artifact",
+        "artifact_id": "meta_data",
+        "content_var": "meta_data_content",
+        "kind": "cloud_init",
+        "logical_name": "meta-data",
+        "media_type": "text/plain",
+        "emit_event": {
+          "message": "Registering cloud-init meta-data artifact",
+          "progress": 65
+        }
+      },
+      {
         "id": "inject_cloud_init",
-        "type": "modify_iso",
+        "type": "prepare_ubuntu_nocloud_iso",
         "iso_path": "{{iso_path}}",
-        "operations": [
-          {
-            "type": "inject_file",
-            "target_path": "/nocloud/user-data",
-            "content": "{{user_data_content}}"
-          },
-          {
-            "type": "inject_file",
-            "target_path": "/nocloud/meta-data",
-            "content": "{{meta_data_content}}"
-          },
-          {
-            "type": "patch_grub_config",
-            "grub_path": "/boot/grub/grub.cfg",
-            "pattern": "{{grub_patch_pattern}}",
-            "replacement": "{{grub_patch_replacement}}"
-          }
-        ],
+        "user_data_artifact": "user_data",
+        "meta_data_artifact": "meta_data",
         "output_path": "{{iso_path}}",
         "volume_label": "Ubuntu_Auto",
         "emit_event": {
