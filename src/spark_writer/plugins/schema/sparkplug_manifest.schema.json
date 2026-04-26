@@ -263,6 +263,26 @@
           "type": "object",
           "description": "Show plugin when condition matches",
           "properties": {
+            "source_family": {
+              "type": "array",
+              "items": {"type": "string"},
+              "description": "Show only for these Source family values"
+            },
+            "source_id": {
+              "type": "array",
+              "items": {"type": "string"},
+              "description": "Show only for these Source IDs"
+            },
+            "installer_scheme": {
+              "type": "array",
+              "items": {"type": "string"},
+              "description": "Show only for these installer scheme values"
+            },
+            "source_capabilities": {
+              "type": "array",
+              "items": {"type": "string"},
+              "description": "Require these Source capabilities"
+            },
             "preset_distro": {
               "type": "array",
               "items": {"type": "string"},

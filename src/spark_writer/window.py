@@ -15,6 +15,8 @@ from .plugins.base import ConfigField
 from .plugins.forms import ConfigFormBuilder
 from .plugins.json_plugin import RuntimeApprovalRequiredError
 from .plugins.manager import PluginManager
+from .receipts import build_receipt_payload
+from .sources import Source, SourceCatalog
 from .core.downloader import Downloader
 
 logger = logging.getLogger(__name__)
@@ -97,13 +99,19 @@ class SparkWindow(Adw.ApplicationWindow):
         
         # Managers
         self._plugin_manager = PluginManager()
+        self._source_catalog = SourceCatalog()
         self._form_builder = ConfigFormBuilder(on_change_callback=self._update_flash_button_state)
         self.downloader = Downloader(os.path.expanduser("~/ISO-Downloads"))
         # Pipeline will be initialized per-flash based on required stages
         self.pipeline: Optional[PipelineNotifier] = None
         self.drives: List[Dict[str, Any]] = []
-        self.all_presets: List[Dict[str, Any]] = []
+        self.all_sources: List[Source] = []
         self._plugin_entries: List[Dict[str, Any]] = []
+        self._sparkplug_rows: List[Gtk.Widget] = []
+        self.selected_sparkplugs: List[Any] = []
+        self.current_source: Optional[Source] = None
+        self._selection_error: Optional[str] = None
+        self._latest_receipt_payload: Optional[Dict[str, Any]] = None
         self._flash_in_progress = False
         
         # Create Pages
@@ -116,8 +124,8 @@ class SparkWindow(Adw.ApplicationWindow):
         # Load Plugins
         self._plugin_manager.load_plugins("spark_writer.plugins.installed")
         
-        # Load All Presets
-        self._load_all_presets()
+        # Load all Sources
+        self._load_all_sources()
             
         # Load Drives
         self._refresh_drives()
@@ -142,8 +150,8 @@ class SparkWindow(Adw.ApplicationWindow):
         # Reload plugins
         self._plugin_manager.load_plugins("spark_writer.plugins.installed")
         
-        # Refresh presets
-        self._load_all_presets()
+        # Refresh Sources
+        self._load_all_sources()
         
         # Show notification
         if self.pipeline:
@@ -151,35 +159,26 @@ class SparkWindow(Adw.ApplicationWindow):
         
         logger.info(message)
     
-    def refresh_presets(self):
-        """Refresh presets without full plugin reload (for feed additions)."""
-        self._load_all_presets()
+    def refresh_sources(self):
+        """Refresh built-in Sources and derived UI state."""
+        self._load_all_sources()
 
-    def _load_all_presets(self):
-        self.all_presets = []
+    def _load_all_sources(self):
+        self.all_sources = self._source_catalog.list_sources()
         model = Gtk.StringList()
-        
-        # Iterate all enabled plugins to gather presets
-        for plugin in self._plugin_manager.plugins:
-            if not self._plugin_manager.is_plugin_enabled(plugin):
-                continue
-                
-            presets = plugin.register_presets()
-            for pid, pdata in presets.items():
-                pdata['id'] = pid
-                pdata['source_plugin'] = plugin
-                self.all_presets.append(pdata)
-                model.append(pdata.get('name', pid))
-                
-        self._preset_row.set_model(model)
-        if self.all_presets:
-            self._preset_row.set_selected(0)
-            self._on_preset_changed(self._preset_row)
+
+        for source in self.all_sources:
+            model.append(source.name)
+
+        self._source_row.set_model(model)
+        if self.all_sources:
+            self._source_row.set_selected(0)
+            self._on_source_changed(self._source_row)
         else:
-            logger.warning("No presets available. Enable a SparkPlug or install one via spark:// URI")
-            self._preset_row.set_selected(Gtk.INVALID_LIST_POSITION)
-            self._plugin_row.set_sensitive(False)
-            self._plugin_row.set_subtitle("Add a SparkPlug to access presets.")
+            logger.warning("No Sources available.")
+            self._source_row.set_selected(Gtk.INVALID_LIST_POSITION)
+            self.current_source = None
+            self._clear_sparkplug_rows()
             self._form_builder.reset(self._pref_page)
 
         self._update_flash_button_state()
@@ -196,24 +195,23 @@ class SparkWindow(Adw.ApplicationWindow):
         self._pref_page = Adw.PreferencesPage()
         toolbar_view.set_content(self._pref_page)
         
-        # 2. Preset Section
-        self._preset_group = Adw.PreferencesGroup(
-            title="Operating System",
-            description="Select the target OS preset."
+        # 2. Source Section
+        self._source_group = Adw.PreferencesGroup(
+            title="Installation Source",
+            description="Select the upstream installer image."
         )
-        self._pref_page.add(self._preset_group)
-        
-        # Preset Row (First)
-        self._preset_row = Adw.ComboRow(title="Preset")
-        self._preset_row.set_icon_name("computer-symbolic")
-        self._preset_row.connect("notify::selected", self._on_preset_changed)
-        self._preset_group.add(self._preset_row)
+        self._pref_page.add(self._source_group)
 
-        # Plugin Row (Second)
-        self._plugin_row = Adw.ComboRow(title="Plugin")
-        self._plugin_row.set_icon_name("toy-brick-symbolic")
-        self._plugin_row.connect("notify::selected", self._on_plugin_changed)
-        self._preset_group.add(self._plugin_row)
+        self._source_row = Adw.ComboRow(title="Source")
+        self._source_row.set_icon_name("computer-symbolic")
+        self._source_row.connect("notify::selected", self._on_source_changed)
+        self._source_group.add(self._source_row)
+
+        self._sparkplug_group = Adw.PreferencesGroup(
+            title="SparkPlugs",
+            description="Enable the compatible customization layers to apply."
+        )
+        self._pref_page.add(self._sparkplug_group)
         
         # 3. Target Device Section
         self._drive_group = Adw.PreferencesGroup(
@@ -322,13 +320,10 @@ class SparkWindow(Adw.ApplicationWindow):
         self._update_flash_button_state()
 
     def _on_reset_form_clicked(self, *_args) -> None:
-        """Reset current plugin form fields to manifest defaults and refresh state."""
+        """Reset selected SparkPlug form fields to manifest defaults and refresh state."""
         self._flash_in_progress = False
         self._clear_secrets_display()
-
-        if self.current_plugin:
-            self._form_builder.reset(self._pref_page)
-            self._form_builder.add_fields(self.current_plugin.get_config_schema(), self._pref_page)
+        self._rebuild_selected_config_form()
 
         self._return_to_config_page()
         self._refresh_drives()
@@ -354,127 +349,124 @@ class SparkWindow(Adw.ApplicationWindow):
         self._drive_row.set_model(model)
         self._update_flash_button_state()
 
-    def _on_preset_changed(self, *args):
-        idx = self._preset_row.get_selected()
-        if idx == Gtk.INVALID_LIST_POSITION or idx >= len(self.all_presets):
-            self.current_preset = None
-            self._plugin_row.set_model(Gtk.StringList())
-            self._plugin_row.set_sensitive(False)
-            self._plugin_row.set_subtitle("Select a preset to configure plugins.")
+    def _clear_sparkplug_rows(self) -> None:
+        for row in self._sparkplug_rows:
+            self._sparkplug_group.remove(row)
+        self._sparkplug_rows = []
+
+    def _on_source_changed(self, *args):
+        idx = self._source_row.get_selected()
+        if idx == Gtk.INVALID_LIST_POSITION or idx >= len(self.all_sources):
+            self.current_source = None
+            self._plugin_entries = []
+            self.selected_sparkplugs = []
+            self._clear_sparkplug_rows()
             self._form_builder.reset(self._pref_page)
             self._update_flash_button_state()
             return
 
-        preset = self.all_presets[idx]
-        self.current_preset = preset
+        self.current_source = self.all_sources[idx]
+        self._rebuild_sparkplug_rows()
+        self._refresh_selected_sparkplugs()
 
+    def _rebuild_sparkplug_rows(self) -> None:
+        self._clear_sparkplug_rows()
         self._plugin_entries = []
-        plugin_model = Gtk.StringList()
 
-        for plugin in self._plugin_manager.plugins:
-            if not self._plugin_manager.is_plugin_enabled(plugin):
-                continue
+        if self.current_source is None:
+            return
 
-            if plugin.should_show_ui(preset['id'], preset):
-                plugin_model.append(plugin.name)
-                self._plugin_entries.append(
-                    {
-                        "plugin": plugin,
-                        "available": bool(getattr(plugin, "is_available", True)),
-                        "reason": getattr(plugin, "unavailable_reason", None),
-                    }
-                )
-
-        self._plugin_row.set_model(plugin_model)
+        source_data = self.current_source.to_dict()
+        for plugin in self._plugin_manager.get_compatible_plugins(source_data):
+            available = bool(getattr(plugin, "is_available", True))
+            reason = getattr(plugin, "unavailable_reason", None)
+            row = Adw.SwitchRow(title=plugin.name)
+            if available:
+                row.set_active(True)
+            else:
+                row.set_sensitive(False)
+                row.set_subtitle(reason or "SparkPlug unavailable.")
+            row.connect("notify::active", self._on_sparkplug_toggled, plugin)
+            self._sparkplug_group.add(row)
+            self._sparkplug_rows.append(row)
+            self._plugin_entries.append(
+                {
+                    "plugin": plugin,
+                    "row": row,
+                    "available": available,
+                    "reason": reason,
+                }
+            )
 
         if not self._plugin_entries:
-            self._plugin_row.set_sensitive(False)
-            warning_msg = f"Preset {preset['name']} has no compatible plugins"
-            logger.warning(warning_msg)
-            self._plugin_row.set_subtitle("No compatible plugins for this preset.")
-            self._plugin_row.set_selected(Gtk.INVALID_LIST_POSITION)
-            self.current_plugin = None
-            self._form_builder.reset(self._pref_page)
-            return
+            placeholder = Adw.ActionRow(
+                title="No compatible SparkPlugs",
+                subtitle="This Source can still be saved or flashed unmodified.",
+            )
+            placeholder.set_sensitive(False)
+            self._sparkplug_group.add(placeholder)
+            self._sparkplug_rows.append(placeholder)
 
-        has_available = any(entry["available"] for entry in self._plugin_entries)
-        self._plugin_row.set_sensitive(has_available)
+    def _on_sparkplug_toggled(self, *_args) -> None:
+        self._refresh_selected_sparkplugs()
 
-        if not has_available:
-            reason = self._plugin_entries[0]["reason"] or "Plugin unavailable. Install required tooling to enable it."
-            self._plugin_row.set_subtitle(reason or "Plugin unavailable")
-            self._plugin_row.set_selected(0)
-            self.current_plugin = None
-            self._form_builder.reset(self._pref_page)
-            self._show_plugin_notice(reason)
-            return
+    def _refresh_selected_sparkplugs(self) -> None:
+        selected: List[Any] = []
+        for entry in self._plugin_entries:
+            row = entry["row"]
+            if entry["available"] and isinstance(row, Adw.SwitchRow) and row.get_active():
+                selected.append(entry["plugin"])
 
-        self._plugin_row.set_subtitle("")
-        selected_index = 0
-        for idx_entry, entry in enumerate(self._plugin_entries):
-            if entry["available"]:
-                selected_index = idx_entry
-                break
-        self._plugin_row.set_selected(selected_index)
-        self._on_plugin_changed(self._plugin_row)
+        self.selected_sparkplugs = self._plugin_manager.sort_plugins(selected)
+        self._selection_error = self._plugin_manager.validate_plugin_selection(self.selected_sparkplugs)
+        self._rebuild_selected_config_form()
+        self._update_flash_button_state()
 
-    def _on_plugin_changed(self, *args):
-        idx = self._plugin_row.get_selected()
-        if (
-            idx == Gtk.INVALID_LIST_POSITION
-            or idx >= len(self._plugin_entries)
-            or not self._plugin_entries
-        ):
-            self.current_plugin = None
-            self._form_builder.reset(self._pref_page)
-            return
-
-        entry = self._plugin_entries[idx]
-        if not entry["available"]:
-            reason = entry["reason"] or "Plugin unavailable."
-            self.current_plugin = None
-            self._form_builder.reset(self._pref_page)
-            self._plugin_row.set_subtitle(reason or "Plugin unavailable")
-            self._show_plugin_notice(reason)
-            return
-
-        plugin = entry["plugin"]
-        self.current_plugin = plugin
-        self._plugin_row.set_subtitle("")
-
-        # Update Config UI
+    def _rebuild_selected_config_form(self) -> None:
         self._form_builder.reset(self._pref_page)
-        self._form_builder.add_fields(plugin.get_config_schema(), self._pref_page)
+
+        if self._selection_error:
+            self._show_plugin_notice(self._selection_error)
+            return
+
+        fields: List[ConfigField] = []
+        for plugin in self.selected_sparkplugs:
+            fields.extend(plugin.get_config_schema())
+
+        if fields:
+            self._form_builder.add_fields(fields, self._pref_page)
 
     def _on_flash_clicked(self, btn):
-        idx = self._preset_row.get_selected()
-        if idx == Gtk.INVALID_LIST_POSITION or idx >= len(self.all_presets):
+        idx = self._source_row.get_selected()
+        if idx == Gtk.INVALID_LIST_POSITION or idx >= len(self.all_sources):
             return
 
-        preset = self.all_presets[idx]
-        self.current_preset = preset
+        source = self.all_sources[idx]
+        self.current_source = source
 
         drive_idx = self._drive_row.get_selected()
         if drive_idx == Gtk.INVALID_LIST_POSITION or not self.drives:
             logger.warning("Flash requested without selecting a drive")
             return
 
-        target_drive = self.drives[drive_idx]
         self.ui_values = self._form_builder.get_values()
 
         self._run_preflight_runtime_approvals(
             include_write_phase=True,
-            on_approved=lambda: self._start_flash_workflow(preset),
+            on_approved=lambda: self._start_flash_workflow(source),
         )
 
-    def _start_flash_workflow(self, preset: Dict[str, Any]) -> None:
+    def _start_flash_workflow(self, source: Source) -> None:
         self._flash_in_progress = True
         self._update_flash_button_state()
         self._clear_secrets_display()
+        self._latest_receipt_payload = None
+        self._last_original_iso_path = None
+        self._last_processed_iso_path = None
 
         # Calculate which stages this flash will need
         stages = [PipelineStage.DOWNLOAD]
-        if self.current_plugin and self.current_plugin.requires_processing():
+        if any(plugin.requires_processing() for plugin in self.selected_sparkplugs):
             stages.append(PipelineStage.PROCESS)
         stages.append(PipelineStage.WRITE)
         # VERIFY and FINALIZE not yet implemented, omit for now
@@ -485,22 +477,25 @@ class SparkWindow(Adw.ApplicationWindow):
         # Switch to progress page
         if self.nav_view.get_visible_page() != self.progress_page:
             self.nav_view.push(self.progress_page)
-        self.progress_page.set_title(f"Flashing {preset['name']}")
-        self._status_page.set_title(f"Flashing {preset['name']}")
+        self.progress_page.set_title(f"Flashing {source.name}")
+        self._status_page.set_title(f"Flashing {source.name}")
         self.progress_bar.set_fraction(0.1)
-        self.pipeline.start(f"Provisioning {preset['name']}")
+        self.pipeline.start(f"Provisioning {source.name}")
         self._active_stage = PipelineStage.DOWNLOAD
         self.pipeline.update_stage(PipelineStage.DOWNLOAD, "Starting download", 0)
 
 
         # Start download/flash process
-        if self.current_plugin:
-            logger.info("Plugin %s active", self.current_plugin.name)
+        if self.selected_sparkplugs:
+            logger.info(
+                "SparkPlugs active: %s",
+                ", ".join(plugin.name for plugin in self.selected_sparkplugs),
+            )
             
         # Trigger download
         self.downloader.start_download(
-            preset['url'], 
-            preset['name'], 
+            source.url,
+            source.name,
             self._on_progress, 
             self._on_download_complete, 
             self._on_error
@@ -508,17 +503,17 @@ class SparkWindow(Adw.ApplicationWindow):
 
     def _on_save_iso_clicked(self, btn):
         """Handle Save ISO button click - first choose save location, then download."""
-        idx = self._preset_row.get_selected()
-        if idx == Gtk.INVALID_LIST_POSITION or idx >= len(self.all_presets):
+        idx = self._source_row.get_selected()
+        if idx == Gtk.INVALID_LIST_POSITION or idx >= len(self.all_sources):
             return
 
-        preset = self.all_presets[idx]
-        self.current_preset = preset
+        source = self.all_sources[idx]
+        self.current_source = source
         self.ui_values = self._form_builder.get_values()
 
         self._run_preflight_runtime_approvals(
             include_write_phase=False,
-            on_approved=lambda: self._prompt_iso_save_location(preset),
+            on_approved=lambda: self._prompt_iso_save_location(source),
         )
 
     def _run_preflight_runtime_approvals(
@@ -528,21 +523,23 @@ class SparkWindow(Adw.ApplicationWindow):
         on_approved: Callable[[], None],
     ) -> None:
         """Evaluate runtime approvals at action start so download can proceed uninterrupted."""
-        plugin = self.current_plugin
-        if not plugin or not hasattr(plugin, 'get_pending_phase_approval'):
-            on_approved()
+        if self._selection_error:
+            self._on_error(self._selection_error)
             return
 
-        pending = []
-        if plugin.requires_processing():
-            iso_pending = plugin.get_pending_phase_approval("on_iso_ready")
-            if iso_pending:
-                pending.append(iso_pending)
+        pending: List[tuple[Any, Any]] = []
+        for plugin in self.selected_sparkplugs:
+            if not hasattr(plugin, 'get_pending_phase_approval'):
+                continue
+            if plugin.requires_processing():
+                iso_pending = plugin.get_pending_phase_approval("on_iso_ready")
+                if iso_pending:
+                    pending.append((plugin, iso_pending))
 
-        if include_write_phase:
-            write_pending = plugin.get_pending_phase_approval("on_write_complete")
-            if write_pending:
-                pending.append(write_pending)
+            if include_write_phase:
+                write_pending = plugin.get_pending_phase_approval("on_write_complete")
+                if write_pending:
+                    pending.append((plugin, write_pending))
 
         if not pending:
             on_approved()
@@ -553,7 +550,7 @@ class SparkWindow(Adw.ApplicationWindow):
                 on_approved()
                 return
 
-            phase_pending = pending[index]
+            plugin, phase_pending = pending[index]
             self._prompt_runtime_approval_async(
                 plugin_label=getattr(plugin, 'name', 'plugin'),
                 phase_name=phase_pending.phase_name,
@@ -590,13 +587,13 @@ class SparkWindow(Adw.ApplicationWindow):
 
         next_prompt()
 
-    def _prompt_iso_save_location(self, preset):
+    def _prompt_iso_save_location(self, source: Source):
         """Prompt user to choose where to save the ISO file before downloading."""
         dialog = Gtk.FileDialog()
         dialog.set_title("Save ISO File")
         
-        # Set suggested filename based on preset name
-        suggested_name = f"{preset['name']}.iso"
+        # Set suggested filename based on Source name
+        suggested_name = f"{source.name}.iso"
         dialog.set_initial_name(suggested_name)
         
         # Set initial folder to Downloads or home
@@ -605,9 +602,9 @@ class SparkWindow(Adw.ApplicationWindow):
             downloads_file = Gio.File.new_for_path(str(downloads_path))
             dialog.set_initial_folder(downloads_file)
         
-        dialog.save(self, None, self._on_iso_save_location_chosen, preset)
+        dialog.save(self, None, self._on_iso_save_location_chosen, source)
 
-    def _on_iso_save_location_chosen(self, dialog, result, preset):
+    def _on_iso_save_location_chosen(self, dialog, result, source: Source):
         """Handle save location selection - start download if location chosen."""
         try:
             file = dialog.save_finish(result)
@@ -622,7 +619,7 @@ class SparkWindow(Adw.ApplicationWindow):
             self._iso_save_dest_path = dest_path
             
             # Now start the download/processing workflow
-            self._start_iso_save_workflow(preset)
+            self._start_iso_save_workflow(source)
             
         except GLib.Error as e:
             # User cancelled or error occurred
@@ -632,15 +629,18 @@ class SparkWindow(Adw.ApplicationWindow):
             else:
                 logger.info("Save cancelled by user")
 
-    def _start_iso_save_workflow(self, preset):
+    def _start_iso_save_workflow(self, source: Source):
         """Start the download and processing workflow after save location is chosen."""
         self._flash_in_progress = True
         self._update_flash_button_state()
         self._clear_secrets_display()
+        self._latest_receipt_payload = None
+        self._last_original_iso_path = None
+        self._last_processed_iso_path = None
 
         # Calculate stages for ISO save (no WRITE stage)
         stages = [PipelineStage.DOWNLOAD]
-        if self.current_plugin and self.current_plugin.requires_processing():
+        if any(plugin.requires_processing() for plugin in self.selected_sparkplugs):
             stages.append(PipelineStage.PROCESS)
         
         # Initialize pipeline
@@ -649,20 +649,23 @@ class SparkWindow(Adw.ApplicationWindow):
         # Switch to progress page
         if self.nav_view.get_visible_page() != self.progress_page:
             self.nav_view.push(self.progress_page)
-        self.progress_page.set_title(f"Saving {preset['name']}")
-        self._status_page.set_title(f"Saving {preset['name']}")
+        self.progress_page.set_title(f"Saving {source.name}")
+        self._status_page.set_title(f"Saving {source.name}")
         self.progress_bar.set_fraction(0.1)
-        self.pipeline.start(f"Downloading {preset['name']}")
+        self.pipeline.start(f"Downloading {source.name}")
         self._active_stage = PipelineStage.DOWNLOAD
         self.pipeline.update_stage(PipelineStage.DOWNLOAD, "Starting download", 0)
 
-        if self.current_plugin:
-            logger.info("Plugin %s active for ISO save", self.current_plugin.name)
+        if self.selected_sparkplugs:
+            logger.info(
+                "SparkPlugs active for ISO save: %s",
+                ", ".join(plugin.name for plugin in self.selected_sparkplugs),
+            )
             
         # Trigger download (will call _on_iso_save_download_complete)
         self.downloader.start_download(
-            preset['url'], 
-            preset['name'], 
+            source.url,
+            source.name,
             self._on_progress, 
             self._on_iso_save_download_complete, 
             self._on_error
@@ -674,12 +677,13 @@ class SparkWindow(Adw.ApplicationWindow):
             self._on_error("Download did not produce an image path")
             return
         logger.info("ISO download complete: %s", file_path)
+        self._last_original_iso_path = file_path
         
         # Complete download stage
         if self.pipeline:
             self.pipeline.complete_stage(PipelineStage.DOWNLOAD)
 
-        if self.current_plugin and self.current_plugin.requires_processing():
+        if any(plugin.requires_processing() for plugin in self.selected_sparkplugs):
             # Start PROCESS stage
             GLib.idle_add(self.status_label.set_text, "Processing ISO...")
             if self.pipeline:
@@ -694,12 +698,12 @@ class SparkWindow(Adw.ApplicationWindow):
             GLib.idle_add(self._save_iso_to_destination, file_path)
 
     def _process_and_save_iso(self, file_path):
-        """Process ISO with plugin and then save to chosen destination."""
+        """Process ISO with selected SparkPlugs and then save to chosen destination."""
         try:
-            if self.current_plugin and hasattr(self.current_plugin, 'on_iso_ready'):
+            if self.selected_sparkplugs:
                 if self.pipeline:
                     GLib.idle_add(
-                        lambda: self.pipeline.update_stage(PipelineStage.PROCESS, "Running plugin...", 50) if self.pipeline else None
+                        lambda: self.pipeline.update_stage(PipelineStage.PROCESS, "Running SparkPlugs...", 50) if self.pipeline else None
                     )
                 
                 new_path = self._run_iso_phase_with_runtime_approval(file_path)
@@ -709,6 +713,7 @@ class SparkWindow(Adw.ApplicationWindow):
             resolved = Path(file_path).expanduser()
             if not resolved.exists():
                 raise FileNotFoundError(f"Processed ISO missing: {resolved}")
+            self._last_processed_iso_path = str(resolved)
             
             # Complete PROCESS stage
             if self.pipeline:
@@ -755,6 +760,7 @@ class SparkWindow(Adw.ApplicationWindow):
 
     def _on_iso_save_complete(self, dest_path):
         """Handle successful ISO save completion."""
+        self._latest_receipt_payload = self._build_receipt_payload()
         secrets = self._collect_completion_secrets()
         if secrets:
             self._update_secrets_display(secrets)
@@ -792,12 +798,13 @@ class SparkWindow(Adw.ApplicationWindow):
             self._on_error("Download did not produce an image path")
             return
         logger.info("Download complete: %s", file_path)
+        self._last_original_iso_path = file_path
         
         # Complete download stage
         if self.pipeline:
             self.pipeline.complete_stage(PipelineStage.DOWNLOAD)
 
-        if self.current_plugin and self.current_plugin.requires_processing():
+        if any(plugin.requires_processing() for plugin in self.selected_sparkplugs):
             # Start PROCESS stage
             GLib.idle_add(self.status_label.set_text, "Processing ISO...")
             if self.pipeline:
@@ -813,11 +820,11 @@ class SparkWindow(Adw.ApplicationWindow):
 
     def _process_iso_in_thread(self, file_path):
         try:
-            if self.current_plugin and hasattr(self.current_plugin, 'on_iso_ready'):
+            if self.selected_sparkplugs:
                 # Update to show processing in progress
                 if self.pipeline:
                     GLib.idle_add(
-                        lambda: self.pipeline.update_stage(PipelineStage.PROCESS, "Running plugin...", 50) if self.pipeline else None
+                        lambda: self.pipeline.update_stage(PipelineStage.PROCESS, "Running SparkPlugs...", 50) if self.pipeline else None
                     )
                 
                 new_path = self._run_iso_phase_with_runtime_approval(file_path)
@@ -827,6 +834,7 @@ class SparkWindow(Adw.ApplicationWindow):
             resolved = Path(file_path).expanduser()
             if not resolved.exists():
                 raise FileNotFoundError(f"Processed ISO missing: {resolved}")
+            self._last_processed_iso_path = str(resolved)
             
             # Complete PROCESS stage
             if self.pipeline:
@@ -907,7 +915,7 @@ class SparkWindow(Adw.ApplicationWindow):
 
     def _post_write_processing_thread(self, device_path: str) -> None:
         try:
-            if self.current_plugin and hasattr(self.current_plugin, 'on_write_complete'):
+            if self.selected_sparkplugs:
                 self._run_write_complete_with_runtime_approval(device_path)
             GLib.idle_add(self._finalize_success)
         except Exception as e:
@@ -919,6 +927,7 @@ class SparkWindow(Adw.ApplicationWindow):
             self.pipeline.complete_stage(PipelineStage.WRITE)
             self.pipeline.success("Flash completed successfully!")
 
+        self._latest_receipt_payload = self._build_receipt_payload(device_info=self._selected_drive_info())
         secrets = self._collect_completion_secrets()
         if secrets:
             self._update_secrets_display(secrets)
@@ -929,32 +938,40 @@ class SparkWindow(Adw.ApplicationWindow):
         self._reset_flash_state()
 
     def _run_iso_phase_with_runtime_approval(self, file_path: str) -> str:
-        if not self.current_plugin:
+        if not self.current_source:
             return file_path
 
-        return self._run_with_runtime_approval(
-            phase_name="on_iso_ready",
-            run_action=lambda: self.current_plugin.on_iso_ready(
-                file_path,
-                self.current_preset,
-                self.ui_values,
-            ),
-        )
+        current_path = file_path
+        source_data = self.current_source.to_dict()
+        for plugin in self.selected_sparkplugs:
+            current_path = self._run_with_runtime_approval(
+                plugin=plugin,
+                phase_name="on_iso_ready",
+                run_action=lambda plugin=plugin, current_path=current_path: plugin.on_iso_ready(
+                    current_path,
+                    source_data,
+                    self.ui_values,
+                ),
+            )
+        return current_path
 
     def _run_write_complete_with_runtime_approval(self, device_path: str) -> None:
-        if not self.current_plugin:
+        if not self.current_source:
             return
 
-        self._run_with_runtime_approval(
-            phase_name="on_write_complete",
-            run_action=lambda: self.current_plugin.on_write_complete(
-                device_path,
-                self.current_preset,
-                self.ui_values,
-            ),
-        )
+        source_data = self.current_source.to_dict()
+        for plugin in self.selected_sparkplugs:
+            self._run_with_runtime_approval(
+                plugin=plugin,
+                phase_name="on_write_complete",
+                run_action=lambda plugin=plugin: plugin.on_write_complete(
+                    device_path,
+                    source_data,
+                    self.ui_values,
+                ),
+            )
 
-    def _run_with_runtime_approval(self, phase_name: str, run_action):
+    def _run_with_runtime_approval(self, *, plugin: Any, phase_name: str, run_action):
         retries = 0
         while True:
             try:
@@ -971,10 +988,10 @@ class SparkWindow(Adw.ApplicationWindow):
                         f"Runtime approval canceled by user for phase '{phase_name}'."
                     ) from approval_error
 
-                if not hasattr(self.current_plugin, 'approve_runtime_commands'):
+                if not hasattr(plugin, 'approve_runtime_commands'):
                     raise RuntimeError("Selected plugin cannot persist runtime approvals")
 
-                self.current_plugin.approve_runtime_commands(approval_error.pending.commands)
+                plugin.approve_runtime_commands(approval_error.pending.commands)
                 retries += 1
 
     def _prompt_runtime_approval(self, approval_error: RuntimeApprovalRequiredError) -> bool:
@@ -983,7 +1000,7 @@ class SparkWindow(Adw.ApplicationWindow):
         done = threading.Event()
 
         command_lines = "\n".join(f"  - {command}" for command in approval_error.pending.commands)
-        plugin_label = approval_error.plugin_id or getattr(self.current_plugin, 'name', 'plugin')
+        plugin_label = approval_error.plugin_id or "plugin"
         message = (
             f"Plugin: {plugin_label}\n"
             f"Phase: {approval_error.pending.phase_name}\n\n"
@@ -1057,7 +1074,7 @@ class SparkWindow(Adw.ApplicationWindow):
     def _show_plugin_notice(self, message: str) -> None:
         notice_field = ConfigField(
             id="plugin-notice",
-            label="Plugin unavailable",
+            label="SparkPlug notice",
             type="info",
             default=message,
         )
@@ -1066,37 +1083,45 @@ class SparkWindow(Adw.ApplicationWindow):
     def _update_flash_button_state(self) -> None:
         # Check if required fields are filled
         required_fields_filled = self._form_builder.are_required_fields_filled()
+        has_source = bool(self.all_sources) and self.current_source is not None
+        save_supported = all(plugin.supports_save_iso() for plugin in self.selected_sparkplugs)
         
-        # Flash Drive button: requires preset, drive, required fields, and not in progress
+        # Flash Drive button: requires Source, drive, valid selection, required fields, and not in progress
         flash_enabled = (
-            bool(self.all_presets) 
+            has_source
             and bool(self.drives) 
             and required_fields_filled
+            and not self._selection_error
             and not self._flash_in_progress
         )
         self._flash_btn.set_sensitive(flash_enabled)
         
-        # Save ISO button: requires preset, required fields, plugin support, and not in progress
+        # Save ISO button: requires Source, valid selection, required fields, and not in progress
         save_enabled = (
-            bool(self.all_presets) 
+            has_source
             and required_fields_filled
+            and not self._selection_error
             and not self._flash_in_progress
-            and (not self.current_plugin or self.current_plugin.supports_save_iso())
+            and save_supported
         )
         self._save_iso_btn.set_sensitive(save_enabled)
         
         # Update tooltips
-        if self.current_plugin and not self.current_plugin.supports_save_iso():
+        if self._selection_error:
+            self._save_iso_btn.set_tooltip_text(self._selection_error)
+        elif not save_supported:
             self._save_iso_btn.set_tooltip_text(
-                f"The {self.current_plugin.name} plugin requires USB device operations "
+                "One or more selected SparkPlugs require USB device operations "
                 "that cannot be saved in an ISO file"
             )
         elif not required_fields_filled:
             self._save_iso_btn.set_tooltip_text("Please fill in all required fields")
         else:
-            self._save_iso_btn.set_tooltip_text("Download and save the ISO file")
+            self._save_iso_btn.set_tooltip_text("Download and save the selected Source")
         
-        if not required_fields_filled:
+        if self._selection_error:
+            self._flash_btn.set_tooltip_text(self._selection_error)
+        elif not required_fields_filled:
             self._flash_btn.set_tooltip_text("Please fill in all required fields")
         elif not self.drives:
             self._flash_btn.set_tooltip_text("No USB drives detected")
@@ -1108,13 +1133,30 @@ class SparkWindow(Adw.ApplicationWindow):
         self._refresh_drives()
         self._update_flash_button_state()
 
+    def _selected_drive_info(self) -> Optional[Dict[str, Any]]:
+        idx = self._drive_row.get_selected()
+        if idx == Gtk.INVALID_LIST_POSITION or idx >= len(self.drives):
+            return None
+        return dict(self.drives[idx])
+
+    def _build_receipt_payload(self, device_info: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        if self.current_source is None:
+            return None
+        return build_receipt_payload(
+            source=self.current_source,
+            sparkplugs=self.selected_sparkplugs,
+            original_iso_path=getattr(self, "_last_original_iso_path", None),
+            processed_iso_path=getattr(self, "_last_processed_iso_path", None),
+            device_info=device_info,
+        )
+
     def _collect_completion_secrets(self) -> Dict[str, str]:
         """Collect secrets to display on completion, including root password fallbacks."""
         secrets: Dict[str, str] = {}
 
-        if self.current_plugin:
+        for plugin in self.selected_sparkplugs:
             try:
-                plugin_secrets = self.current_plugin.get_ephemeral_secrets()
+                plugin_secrets = plugin.get_ephemeral_secrets()
                 if isinstance(plugin_secrets, dict):
                     secrets.update({str(k): str(v) for k, v in plugin_secrets.items() if str(v).strip()})
             except Exception as e:
@@ -1252,5 +1294,3 @@ class SparkWindow(Adw.ApplicationWindow):
         entry_box.append(secret_display_box)
         
         return entry_box
-
-

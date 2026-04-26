@@ -111,6 +111,12 @@ class SparkPlug(ABC):
         """Plugin name."""
         pass
 
+    @property
+    def plugin_id(self) -> str:
+        """Stable identifier for ordering and receipts."""
+
+        return self.name
+
     def register_presets(self) -> Dict[str, Any]:
         """
         Return a dictionary of OS presets.
@@ -234,3 +240,18 @@ class SparkPlug(ABC):
         Return True if the plugin UI should be shown for the selected preset.
         """
         return True
+
+    def is_compatible_with_source(self, source: Dict[str, Any]) -> bool:
+        """Return True when the plugin should be offered for the selected Source."""
+
+        return self.should_show_ui(str(source.get("id", "")), source)
+
+    def get_declared_artifact_ids(self) -> List[str]:
+        """Return artifact identifiers declared by the plugin for conflict checks."""
+
+        return []
+
+    def get_declared_host_action_types(self) -> List[str]:
+        """Return host-owned action types used by the plugin for conflict checks."""
+
+        return []

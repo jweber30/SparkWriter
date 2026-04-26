@@ -4,16 +4,13 @@ A native GTK4/LibAdwaita application designed to be modular and lightweight.
 
 ## Document Status And Provenance
 
-This README is the practical usage guide and may include behavior that is still evolving.
+This README is the practical usage and development guide.
 
-- Treat the JSON schema and current test suite as the strongest current contract.
-- Treat policy sections here as current implementation notes unless they are explicitly marked stable.
-- Track evolving design decisions and rationale in `docs/DECISIONS.md`.
+- Treat the SparkPlug author reference in `docs/SPARKPLUG_AUTHORING.md` as the normative authoring guide.
+- Treat the JSON schema and current test suite as the strongest implementation contract.
+- Treat policy sections here as implementation notes unless they are explicitly marked stable.
 
 If a README statement conflicts with code/tests, prefer code/tests and open a docs follow-up.
-
-## Features
-
 
 ## What Is SparkWriter?
 
@@ -34,9 +31,11 @@ SparkWriter is a **modular USB provisioning tool** for bare-metal infrastructure
 - Automated hardware imaging pipelines
 - Chrome OS Crostini-friendly USB creation
 
-## SparkPlug Guide (JSON Manifests)
+## SparkPlug Overview
 
-SparkPlugs are installed as JSON manifests distributed via HTTPS URLs. External authors should follow the manifest specification below.
+SparkPlugs are JSON manifests that extend SparkWriter with presets, forms, and lifecycle actions.
+
+External authors should use `docs/SPARKPLUG_AUTHORING.md` for the current manifest and runtime contract.
 
 ### Publisher Quickstart (2 Minutes)
 
@@ -56,6 +55,22 @@ SparkPlugs are installed as JSON manifests distributed via HTTPS URLs. External 
 
 Current publishing recommendation:
 
+- Publish over HTTPS.
+- Keep `metadata.id` stable across releases.
+- If you host on GitHub, sign the manifest as described in `docs/SPARKPLUG_AUTHORING.md`.
+- Test both local-file install and URL install before sharing a link.
+
+### SparkPlug Authoring Reference
+
+The detailed SparkPlug specification now lives in `docs/SPARKPLUG_AUTHORING.md`.
+
+That document covers:
+
+- manifest shape and required fields
+- trust, GitHub signing, and install-time behavior
+- presets, remote feeds, and torrent support
+- config fields, visibility rules, and template behavior
+- lifecycle phases, action semantics, approvals, artifacts, and retired actions
 
 ## URI Handler & Chromebook Integration
 
@@ -100,81 +115,7 @@ The `%u` placeholder receives the full URI. SparkWriter's `app.py` intercepts th
 
 See the Installation Paths section below for where downloaded manifests are stored.
 
-This guide covers:
-
-
-### 1. Quick Start
-
-1. Create a JSON file with `version`, `metadata`, and `requires`.
-2. Add either `presets` and/or `preset_feeds`.
-3. Add optional `config_fields`, `templates`, and `actions`.
-4. Host the JSON at an HTTPS URL (or use a local file during development).
-5. Install via `spark://plugin/add?manifest=...`.
-
-### 2. Manifest Shape
-
-At minimum:
-
-```json
-{
-    "version": "1.0",
-    "metadata": {
-        "id": "example-plugin",
-        "name": "Example Plugin"
-    },
-    "requires": {
-        "commands": []
-    }
-}
-```
-
-Required top-level keys:
-
-- `version`: must be `"1.0"`
-- `metadata`: must include `id` and `name`
-- `requires`: declared runtime dependencies (especially external commands)
-
-Important metadata fields:
-
-- `metadata.id`: lowercase letters, digits, and hyphens only (`^[a-z0-9-]+$`)
-- `metadata.name`: display name shown in UI
-- `metadata.version`, `author`, `description`, `homepage`: optional but recommended
-
-### 3. Distribution And Trust Rules
-
-When installing from URL (`spark://plugin/add?...`), Spark Writer applies trust checks:
-
-- `file://` and local paths: trusted
-- `localhost`: allowed with confirmation
-- `http://`: blocked by default
-- GitHub-hosted URLs (`github.com`, `raw.githubusercontent.com`, `gist.githubusercontent.com`, `*.github.io`):
-    - High-security online authorization is required.
-    - `metadata.github_username` must exist.
-    - Username derived from URL must match `metadata.github_username`.
-    - `metadata.signature.openssh` must verify against one of `https://api.github.com/users/{username}/ssh_signing_keys`.
-    - If username cannot be derived and cross-checked, installation is blocked.
-    - If the manifest source is private and returns unauthorized, Spark Writer can prompt for a one-time GitHub token and retry the single download.
-    - Token is used in-memory for that install attempt only.
-- Other `https://` hosts: allowed, but user sees confirmation prompt
-
-Recommended for external distribution:
-
-- Host manifests on HTTPS
-- Use a stable URL per release
-- Keep plugin ID stable across updates
-
-### 3.1 Manifest Update Model
-
-Spark Writer installs manifests as local snapshots.
-
-Current behavior:
-
-- No automatic remote manifest updates after install.
-- Publisher changes are picked up only when the user explicitly reinstalls the updated manifest URL.
-- Legacy secure-manifest keys (`secure_manifest`, `signature`) are deprecated and rejected.
-- GitHub signature authorization runs during explicit install/reinstall flows (no background auto-update checks).
-
-### 4. Installation Paths
+## Installation Paths
 
 #### Install from a manifest URL
 
@@ -188,6 +129,7 @@ Notes:
 
 - `manifest=` and `url=` are both accepted query keys.
 - URL-encode the manifest URL.
+- URL installs are snapshot installs. Reinstall explicitly to pick up publisher changes.
 
 #### Local development install
 
@@ -199,229 +141,19 @@ Put your manifest in:
 
 Then restart Spark Writer. JSON files in that directory are loaded automatically.
 
-### 5. Command Dependencies And Approval Model
+## Command Dependencies And Approval Model
 
-Declare external commands under `requires.commands`:
-
-```json
-"requires": {
-    "commands": [
-        {
-            "name": "mkpasswd",
-            "description": "Generate password hashes",
-            "install_hint": "apt install whois",
-            "allow_plugin_specific": true
-        }
-    ]
-}
-```
-
-Behavior:
-
-- Missing commands block plugin availability.
-- Commands marked `allow_plugin_specific: true` are shown for user approval at install time.
-- Approved commands are stored in a local approval file (`.<plugin-id>.approval`) next to the installed manifest.
-- `run_command` actions can only execute commands that were explicitly approved for that plugin.
-
-### 6. Presets: Static And Remote
-
-#### Static presets (`presets`)
-
-Each preset can provide:
-
-- `id`, `name`, `url`
-- optional: `sha256`, `distro`, `metadata`
-
-#### Remote feeds (`preset_feeds`)
-
-- Feed URLs must be HTTPS.
-- Feed format is JSON Feed 1.1.
-- Presets are read from `items` where `id` starts with `preset:`.
-- Static `presets` in your manifest override feed entries with the same ID.
-
-### 6.1 Torrent And Magnet ISO Downloads
-
-Yes, torrent-based ISO downloading still exists and is active.
-
-Supported preset URL formats:
-
-- `magnet:?xt=...`
-- `https://.../image.iso.torrent` (or `http://.../image.iso.torrent`)
-- direct ISO links: `https://.../image.iso`
+Declare external commands under `requires.commands`.
 
 Current behavior:
 
-- Downloads are handled by the built-in downloader using `libtorrent` for magnet/torrent and HTTP(S) for direct files.
-- In JSON Feed imports, attachment parsing prefers torrent links first, then falls back to direct ISO links.
-- The resolved downloaded target prefers `.iso` files when a torrent contains multiple files.
+- Missing commands block plugin availability.
+- Commands with `allow_plugin_specific: true` are disclosed during install.
+- Actual approval is enforced at runtime per lifecycle phase.
+- Approved commands are persisted under `XDG_STATE_HOME/spark-writer/approvals/` or `~/.local/state/spark-writer/approvals/` when `XDG_STATE_HOME` is unset.
+- Legacy approval files next to the manifest are ignored unless they use the current `invocation-v2` approval model.
 
-Publisher notes:
-
-- Torrent support depends on `libtorrent` being available in the Spark Writer runtime environment.
-- For `.torrent` URLs, keep a clean `.torrent` suffix in the URL path for best compatibility.
-- It is still good practice to provide `sha256` when available, even when distributing via torrent.
-
-### 7. UI Configuration Fields
-
-Use `config_fields` to collect user input.
-
-Supported field types:
-
-- `text`
-- `password`
-- `select`
-- `multiline`
-
-Common properties:
-
-- `id`, `label`, `type`
-- `required`, `default`, `description`, `placeholder`
-- `options` for `select`
-- `big` for expanded multiline layout
-
-Template references use `{{field_id}}`.
-
-Optional UI visibility controls:
-
-- `ui_visibility.when.preset_distro`: show plugin UI only for matching preset distro values
-- `ui_visibility.when.preset_id`: show plugin UI only for matching preset IDs
-
-### 8. Templates
-
-`templates` is a key-value object where each value can be:
-
-- an inline string template
-- an array of lines (joined with newlines)
-- a sidecar file reference: `{ "file": "relative/path" }`
-- an asset reference: `{ "asset": "asset-name" }`
-
-Example:
-
-```json
-"templates": {
-    "post_write_note": "Wrote {{preset_name}} to {{device_path}}"
-}
-```
-
-Templates can be consumed by actions like `render_template` and `write_file`.
-
-Compatibility note:
-
-- Template context automatically bridges `apt-cache` and `apt-proxy` keys in either direction for backward compatibility.
-
-### 9. Lifecycle Hooks And Actions
-
-Hooks:
-
-- `actions.on_iso_ready`: runs before write, while processing ISO artifacts
-- `actions.on_write_complete`: runs after USB write completes
-
-Stable schema action types:
-
-- `render_template`
-- `run_command`
-- `write_file`
-- `compute_file_hash`
-- `create_partition`
-- `write_partition_files`
-- `generate_receipt`
-
-Useful action fields:
-
-- `id`, `type`
-- `when` condition (`not_empty`, `empty`, `equals`, `not_equals`, `in`, `not_in`)
-- `emit_event` with `message` and `progress`
-- `output_var` to store action results for later actions
-
-Compatibility note:
-
-- Runtime may include additional internal action types.
-- Internal/experimental action types currently implemented include `format_yaml_list`, `generate_ephemeral_password`, `store_ephemeral_secret`, and `show_ephemeral_secret_button`.
-- External plugins should target the schema-listed action types above for forward compatibility.
-
-`generate_receipt` supports two modes:
-
-- Signing mode: `signing.private_key` with optional output fields such as signature/hash/public key.
-- Keyed fingerprint mode: `inputs.keyed_fingerprints` for HMAC fingerprints over selected fields.
-
-Receipt dependency note:
-
-- Ed25519 receipt signing requires `pynacl` in the runtime environment.
-
-### 10. Minimal End-To-End Example
-
-```json
-{
-    "version": "1.0",
-    "metadata": {
-        "id": "hello-receipt",
-        "name": "Hello Receipt",
-        "version": "0.1.0",
-        "author": "Example Org",
-        "description": "Demonstrates config fields, templates, and post-write actions"
-    },
-    "requires": {
-        "commands": []
-    },
-    "presets": [
-        {
-            "id": "ubuntu-24-04",
-            "name": "Ubuntu 24.04",
-            "url": "https://releases.ubuntu.com/noble/ubuntu-24.04.3-live-server-amd64.iso",
-            "distro": "ubuntu"
-        }
-    ],
-    "config_fields": [
-        {
-            "id": "operator_name",
-            "label": "Operator Name",
-            "type": "text",
-            "required": true,
-            "placeholder": "alice"
-        }
-    ],
-    "templates": {
-        "write_note": "Preset {{preset_name}} written by {{operator_name}}"
-    },
-    "actions": {
-        "on_write_complete": [
-            {
-                "id": "render_note",
-                "type": "render_template",
-                "template": "write_note",
-                "output_var": "note_text",
-                "emit_event": {
-                    "message": "Rendering write note",
-                    "progress": 70
-                }
-            },
-            {
-                "id": "write_note_file",
-                "type": "write_file",
-                "path": "/tmp/spark-{{preset_id}}-note.txt",
-                "content": "{{note_text}}",
-                "permissions": "644",
-                "emit_event": {
-                    "message": "Writing note file",
-                    "progress": 100
-                }
-            }
-        ]
-    }
-}
-```
-
-### 11. Validation Checklist
-
-Before publishing:
-
-1. Validate JSON syntax.
-2. Ensure `version` is `1.0`.
-3. Ensure `metadata.id` matches `^[a-z0-9-]+$`.
-4. Verify every required command exists and has an install hint.
-5. Test install from both local file and HTTPS URL.
-6. Confirm plugin appears in UI and presets load.
-7. Run a full write flow and verify hook behavior.
+For exact approval file shape and phase behavior, use `docs/SPARKPLUG_AUTHORING.md`.
 
 ## Development
 
@@ -518,11 +250,15 @@ spark-writer
 Or use the manifest approval file to pre-approve commands:
 
 ```bash
-# ~/.local/share/spark-writer/plugins/.my-plugin-id.approval
+# ~/.local/state/spark-writer/approvals/.my-plugin-id.approval
 {
-    "commands": ["mkpasswd"]
+    "plugin_id": "my-plugin-id",
+    "approval_model": "invocation-v2",
+    "approved_commands": ["mkpasswd"]
 }
 ```
+
+Approval files stored next to the manifest are only honored when they use the current `invocation-v2` model.
 
 ### Running Tests
 

@@ -350,6 +350,10 @@ class JsonSparkPlug(SparkPlug):
     def name(self) -> str:
         return self.manifest.get('metadata', {}).get('name', 'Unknown Plugin')
 
+    @property
+    def plugin_id(self) -> str:
+        return self._plugin_id() or self.name
+
     def requires_processing(self) -> bool:
         """Return True if plugin has on_iso_ready actions."""
         actions = self.manifest.get('actions', {})
@@ -472,20 +476,51 @@ class JsonSparkPlug(SparkPlug):
     def should_show_ui(self, preset_id: str, preset_data: Dict[str, Any]) -> bool:
         """Determine if plugin UI should be shown based on manifest rules."""
         visibility = self.manifest.get('ui_visibility', {}).get('when', {})
-        
-        # Check distro filter
+
+        source_id = str(
+            preset_data.get('source_id') or preset_data.get('id') or preset_id or ''
+        ).strip()
+        source_family = str(
+            preset_data.get('source_family') or preset_data.get('family') or preset_data.get('distro') or ''
+        ).lower()
+        installer_scheme = str(preset_data.get('installer_scheme') or '').strip()
+        source_capabilities = {
+            str(item).strip()
+            for item in preset_data.get('source_capabilities', preset_data.get('capabilities', []))
+            if str(item).strip()
+        }
+
+        allowed_source_ids = visibility.get('source_id', [])
+        if allowed_source_ids and source_id not in allowed_source_ids:
+            return False
+
+        allowed_source_families = visibility.get('source_family', [])
+        if allowed_source_families:
+            if source_family not in [str(item).lower() for item in allowed_source_families]:
+                return False
+
+        allowed_schemes = visibility.get('installer_scheme', [])
+        if allowed_schemes and installer_scheme not in allowed_schemes:
+            return False
+
+        required_capabilities = visibility.get('source_capabilities', [])
+        if required_capabilities:
+            normalized_requirements = {
+                str(item).strip() for item in required_capabilities if str(item).strip()
+            }
+            if not normalized_requirements.issubset(source_capabilities):
+                return False
+
+        # Compatibility aliases for legacy manifests.
         allowed_distros = visibility.get('preset_distro', [])
         if allowed_distros:
-            distro = preset_data.get('distro', '').lower()
-            if distro not in [d.lower() for d in allowed_distros]:
+            if source_family not in [str(d).lower() for d in allowed_distros]:
                 return False
-        
-        # Check preset ID filter
+
         allowed_presets = visibility.get('preset_id', [])
-        if allowed_presets:
-            if preset_id not in allowed_presets:
-                return False
-        
+        if allowed_presets and source_id not in allowed_presets:
+            return False
+
         return True
 
     def _evaluate_condition(self, condition: Dict[str, Any], ui_values: Dict[str, Any]) -> bool:
@@ -607,6 +642,13 @@ class JsonSparkPlug(SparkPlug):
             'device_path': device_path,
             'preset_id': preset.get('id', ''),
             'preset_name': preset.get('name', ''),
+            'source_id': preset.get('source_id', preset.get('id', '')),
+            'source_name': preset.get('source_name', preset.get('name', '')),
+            'source_family': preset.get('source_family', preset.get('family', preset.get('distro', ''))),
+            'source_url': preset.get('source_url', preset.get('url', '')),
+            'source_version': preset.get('source_version', preset.get('version', '')),
+            'installer_scheme': preset.get('installer_scheme', ''),
+            'source_capabilities': preset.get('source_capabilities', preset.get('capabilities', [])),
         }
 
         # Compatibility bridge for legacy template key naming.
@@ -1224,3 +1266,33 @@ class JsonSparkPlug(SparkPlug):
             True if secrets exist, False otherwise
         """
         return len(self._ephemeral_secrets) > 0
+
+    def get_declared_artifact_ids(self) -> List[str]:
+        artifact_ids: List[str] = []
+        seen: set[str] = set()
+        for actions in self.manifest.get("actions", {}).values():
+            if not isinstance(actions, list):
+                continue
+            for action in actions:
+                artifact_id = str(action.get("artifact_id", "")).strip()
+                if artifact_id and artifact_id not in seen:
+                    seen.add(artifact_id)
+                    artifact_ids.append(artifact_id)
+        return artifact_ids
+
+    def get_declared_host_action_types(self) -> List[str]:
+        host_owned = {
+            "prepare_ubuntu_nocloud_iso",
+            "prepare_proxmox_auto_install_iso",
+        }
+        action_types: List[str] = []
+        seen: set[str] = set()
+        for actions in self.manifest.get("actions", {}).values():
+            if not isinstance(actions, list):
+                continue
+            for action in actions:
+                action_type = str(action.get("type", "")).strip()
+                if action_type in host_owned and action_type not in seen:
+                    seen.add(action_type)
+                    action_types.append(action_type)
+        return action_types

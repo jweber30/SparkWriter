@@ -1,15 +1,19 @@
 import importlib
-import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 from .base import EventEmitter, SparkPlug
 from .json_plugin import JsonSparkPlug
 
 logger = logging.getLogger(__name__)
 
 class PluginManager:
+    _CONFLICTING_HOST_ACTION_TYPES = {
+        "prepare_ubuntu_nocloud_iso",
+        "prepare_proxmox_auto_install_iso",
+    }
+
     def __init__(self):
         self.plugins: List[SparkPlug] = []
         self.disabled_plugins = set()
@@ -129,3 +133,59 @@ class PluginManager:
         for plugin in self.plugins:
             if self.is_plugin_enabled(plugin):
                 plugin.on_write_complete(device_path, preset, ui_values)
+
+    def iter_enabled_plugins(self) -> Iterable[SparkPlug]:
+        for plugin in self.plugins:
+            if self.is_plugin_enabled(plugin):
+                yield plugin
+
+    def sort_plugins(self, plugins: Iterable[SparkPlug]) -> List[SparkPlug]:
+        return sorted(plugins, key=lambda plugin: (plugin.plugin_id, plugin.name))
+
+    def get_compatible_plugins(self, source: Dict[str, Any]) -> List[SparkPlug]:
+        compatible = [
+            plugin for plugin in self.iter_enabled_plugins() if plugin.is_compatible_with_source(source)
+        ]
+        return self.sort_plugins(compatible)
+
+    def validate_plugin_selection(self, plugins: Iterable[SparkPlug]) -> Optional[str]:
+        ordered = self.sort_plugins(plugins)
+
+        field_owners: Dict[str, str] = {}
+        for plugin in ordered:
+            for field in plugin.get_config_schema():
+                if not field.id:
+                    continue
+                owner = field_owners.get(field.id)
+                if owner:
+                    return (
+                        f"SparkPlug conflict: both {owner} and {plugin.name} "
+                        f"declare the config field '{field.id}'."
+                    )
+                field_owners[field.id] = plugin.name
+
+        artifact_owners: Dict[str, str] = {}
+        for plugin in ordered:
+            for artifact_id in plugin.get_declared_artifact_ids():
+                owner = artifact_owners.get(artifact_id)
+                if owner:
+                    return (
+                        f"SparkPlug conflict: both {owner} and {plugin.name} "
+                        f"declare the artifact '{artifact_id}'."
+                    )
+                artifact_owners[artifact_id] = plugin.name
+
+        host_action_owners: Dict[str, str] = {}
+        for plugin in ordered:
+            for action_type in plugin.get_declared_host_action_types():
+                if action_type not in self._CONFLICTING_HOST_ACTION_TYPES:
+                    continue
+                owner = host_action_owners.get(action_type)
+                if owner:
+                    return (
+                        f"SparkPlug conflict: both {owner} and {plugin.name} "
+                        f"use the host-owned action '{action_type}'."
+                    )
+                host_action_owners[action_type] = plugin.name
+
+        return None

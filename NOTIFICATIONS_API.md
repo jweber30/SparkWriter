@@ -13,8 +13,8 @@ sudo apt-get install libnotify-bin
 ## Installation
 
 ```bash
-# Development install from monorepo
-pip install -e apps/spark-writer
+# Development install from this repository
+pip install -e .
 ```
 
 ## Quick Start
@@ -85,7 +85,7 @@ notifier.send_notification(notification)
 
 ### 2. `PipelineNotifier` (Pipeline Orchestrator)
 
-**Purpose**: Manages a single, persistent notification across a multi-stage process, automatically calculating and displaying the overall progress.
+**Purpose**: Manages a single, persistent notification across a multi-stage process.
 
 ```python
 from usb_writer_core.notifications import PipelineNotifier, PipelineStage
@@ -96,18 +96,22 @@ pipeline = PipelineNotifier(app_name="USB Writer")
 # Start the overall process
 pipeline.start("Writing Ubuntu 24.04 to USB")
 
-# Stage 1: Download (0-25% of overall progress)
-pipeline.update_stage(PipelineStage.DOWNLOAD, "Downloading ISO...", stage_progress=50) # 12.5% overall
+# Stage 1: Download
+pipeline.update_stage(PipelineStage.DOWNLOAD, "Downloading ISO...", progress=50)
 
-# Stage 2: Write (25-50% of overall progress)
-pipeline.update_stage(PipelineStage.WRITE, "Writing to /dev/sdb", stage_progress=50) # 37.5% overall
-pipeline.complete_stage(PipelineStage.WRITE) # 50% overall
+# Stage 2: Process
+pipeline.update_stage(PipelineStage.PROCESS, "Injecting configuration", progress=50)
+pipeline.complete_stage(PipelineStage.PROCESS)
 
-# Stage 3: Verify (50-75% of overall progress)
-pipeline.update_stage(PipelineStage.VERIFY, "Verifying checksum...", stage_progress=100) # 75% overall
+# Stage 3: Write
+pipeline.update_stage(PipelineStage.WRITE, "Writing to /dev/sdb", progress=50)
+pipeline.complete_stage(PipelineStage.WRITE)
 
-# Stage 4: Finalize (75-100% of overall progress)
-pipeline.complete_stage(PipelineStage.FINALIZE) # 100% overall
+# Stage 4: Verify
+pipeline.complete_stage(PipelineStage.VERIFY)
+
+# Stage 5: Finalize
+pipeline.complete_stage(PipelineStage.FINALIZE)
 
 # Mark the entire pipeline as successful
 pipeline.success("USB drive is ready!")
@@ -115,23 +119,38 @@ pipeline.success("USB drive is ready!")
 
 **Pipeline Stages (`PipelineStage` enum)**:
 - `DOWNLOAD`
+- `PROCESS`
 - `WRITE`
 - `VERIFY`
 - `FINALIZE`
 
-Each stage contributes equally to the total progress (25% each in the default configuration).
+Default stage progress is reported per active stage, not as a weighted aggregate across the whole pipeline.
+
+Current notification body format is:
+
+- stage emoji
+- `[current/total]` stage counter
+- capitalized stage name
+- caller-provided message
+
+Example body:
+
+```text
+⚙️ [2/5] Process • Injecting configuration
+```
 
 **Why Use This**:
 - ✅ Simplifies notifications for complex, multi-step operations.
 - ✅ Provides a single, non-spammy notification to the user.
-- ✅ Automatically calculates and updates a continuous progress bar from 0% to 100%.
+- ✅ Reuses one persistent notification ID across the workflow.
+- ✅ Shows stage-local progress and the current pipeline position.
 - ✅ Clear success and failure states.
 
 ---
 
 ## Complete Pipeline Example
 
-This example demonstrates how to use the `PipelineNotifier` to show progress for a complete "download and write" workflow.
+This example demonstrates how to use the `PipelineNotifier` to show progress for a complete workflow.
 
 ```python
 import time
@@ -146,26 +165,33 @@ pipeline.start("Preparing Proxmox USB")
 # 3. Simulate Download stage
 pipeline.update_stage(PipelineStage.DOWNLOAD, "Downloading Proxmox ISO...")
 for i in range(0, 101, 10):
-    pipeline.update_stage(PipelineStage.DOWNLOAD, f"Downloading Proxmox ISO... {i}%", stage_progress=i)
+    pipeline.update_stage(PipelineStage.DOWNLOAD, f"Downloading Proxmox ISO... {i}%", progress=i)
     time.sleep(0.1)
 pipeline.complete_stage(PipelineStage.DOWNLOAD)
 
-# 4. Simulate Write stage
+# 4. Simulate Process stage
+pipeline.update_stage(PipelineStage.PROCESS, "Injecting configuration...")
+for i in range(0, 101, 10):
+    pipeline.update_stage(PipelineStage.PROCESS, f"Injecting configuration... {i}%", progress=i)
+    time.sleep(0.1)
+pipeline.complete_stage(PipelineStage.PROCESS)
+
+# 5. Simulate Write stage
 pipeline.update_stage(PipelineStage.WRITE, "Writing to USB drive...")
 for i in range(0, 101, 10):
-    pipeline.update_stage(PipelineStage.WRITE, f"Writing to USB drive... {i}%", stage_progress=i)
+    pipeline.update_stage(PipelineStage.WRITE, f"Writing to USB drive... {i}%", progress=i)
     time.sleep(0.1)
 pipeline.complete_stage(PipelineStage.WRITE)
 
-# 5. Simulate Verify and Finalize
+# 6. Simulate Verify and Finalize
 pipeline.complete_stage(PipelineStage.VERIFY)
 pipeline.complete_stage(PipelineStage.FINALIZE)
 
-# 6. Mark as successful
+# 7. Mark as successful
 pipeline.success("Proxmox USB is ready to use!")
 ```
 
-**Result**: A single desktop notification will appear, starting at 0% and smoothly progressing to 100% as the stages complete, with the status text updating along the way.
+**Result**: A single desktop notification is reused throughout the workflow. The progress bar reflects the active stage's current `progress` value, and the body shows which stage is running.
 
 ---
 
@@ -173,11 +199,13 @@ pipeline.success("Proxmox USB is ready to use!")
 
 The `DesktopNotifier` calls `notify-send` in a separate process for each notification. This makes it safe to call from multiple threads without worrying about shared D-Bus connections or other complex state.
 
+If SparkWriter is running as root and `DBUS_SESSION_BUS_ADDRESS` points at a user session bus under `/run/user/<uid>/bus`, the notifier wraps `notify-send` with `runuser` so the notification is delivered into the user's desktop session.
+
 ---
 
 ## Testing Without a Desktop Environment
 
-If `notify-send` is not available (e.g., in a CI/CD environment or a headless server), the `DesktopNotifier` will gracefully fail. It will print the notification content to `stderr` instead of crashing, allowing your application to run without a graphical environment.
+If `notify-send` is not available or fails, `DesktopNotifier` logs the error and returns without raising. It does not print a fallback notification payload to `stderr`.
 
 ---
 

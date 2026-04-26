@@ -18,22 +18,12 @@
       }
     ]
   },
-  "presets": [
-    {
-      "id": "ubuntu-24.04-server",
-      "name": "Ubuntu 24.04 LTS Server",
-      "url": "https://releases.ubuntu.com/noble/ubuntu-24.04.3-live-server-amd64.iso.torrent",
-      "sha256": "",
-      "distro": "ubuntu"
-    },
-    {
-      "id": "ubuntu-22.04-server",
-      "name": "Ubuntu 22.04 LTS Server",
-      "url": "https://releases.ubuntu.com/jammy/ubuntu-22.04.5-live-server-amd64.iso.torrent",
-      "sha256": "",
-      "distro": "ubuntu"
+  "ui_visibility": {
+    "when": {
+      "source_family": ["ubuntu"],
+      "installer_scheme": ["ubuntu-nocloud"]
     }
-  ],
+  },
   "config_fields": [
     {
       "id": "hostname",
