@@ -24,6 +24,9 @@ class ConfigFormBuilder:
         self._current_group: Optional[Adw.PreferencesGroup] = None
         self._on_change_callback = on_change_callback
 
+    def set_on_change_callback(self, callback) -> None:
+        self._on_change_callback = callback
+
     # ------------------------------------------------------------------
     # Lifecycle helpers
     # ------------------------------------------------------------------
@@ -34,9 +37,16 @@ class ConfigFormBuilder:
             self._current_group = None
         self._bindings.clear()
 
-    def add_fields(self, fields: List[ConfigField], page: Adw.PreferencesPage) -> None:
+    def add_fields(
+        self,
+        fields: List[ConfigField],
+        page: Adw.PreferencesPage,
+        *,
+        title: str = "Configuration",
+        description: Optional[str] = None,
+    ) -> None:
         # Create a preferences group for the fields
-        self._current_group = Adw.PreferencesGroup(title="Configuration")
+        self._current_group = Adw.PreferencesGroup(title=title, description=description)
         page.add(self._current_group)
         
         for field in fields:
@@ -64,6 +74,20 @@ class ConfigFormBuilder:
         for key, binding in self._bindings.items():
             values[key] = self._extract_value(binding.field, binding.widget)
         return values
+
+    def get_fields(self) -> List[ConfigField]:
+        return [binding.field for binding in self._bindings.values()]
+
+    def set_values(self, values: Dict[str, Any], *, only_empty: bool = False) -> None:
+        for key, value in values.items():
+            binding = self._bindings.get(key)
+            if binding is None:
+                continue
+            if only_empty and not self._is_empty_value(self._extract_value(binding.field, binding.widget)):
+                continue
+            self._set_value(binding.field, binding.widget, value)
+            self._update_binding_validation_state(binding)
+        self._notify_change()
 
     def are_required_fields_filled(self) -> bool:
         """Check if all required fields have non-empty values and update UI state."""
@@ -270,3 +294,27 @@ class ConfigFormBuilder:
             return ""
 
         return "" 
+
+    def _set_value(self, field: ConfigField, widget: Gtk.Widget, value: Any) -> None:
+        text_value = "" if value is None else str(value)
+
+        if hasattr(widget, "_input_widget"):
+            real_widget = widget._input_widget
+            if isinstance(real_widget, Gtk.TextView):
+                real_widget.get_buffer().set_text(text_value)
+                return
+            if isinstance(real_widget, Gtk.PasswordEntry):
+                real_widget.set_text(text_value)
+                return
+            if isinstance(real_widget, Gtk.DropDown):
+                for idx, option in enumerate(field.options):
+                    if option.value == value or str(option.value) == text_value:
+                        real_widget.set_selected(idx)
+                        return
+                return
+
+        if isinstance(widget, Adw.EntryRow):
+            widget.set_text(text_value)
+            return
+        if hasattr(Adw, "PasswordEntryRow") and isinstance(widget, Adw.PasswordEntryRow):
+            widget.set_text(text_value)

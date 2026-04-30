@@ -148,6 +148,11 @@ class SparkPlug(ABC):
             normalized.append(self._coerce_config_field(field))
         return normalized
 
+    def get_wizard_pages(self) -> List[Dict[str, Any]]:
+        """Return optional manifest-defined wizard pages for config fields."""
+
+        return []
+
     @staticmethod
     def _coerce_config_field(field: Union[ConfigField, Dict[str, Any]]) -> ConfigField:
         if isinstance(field, ConfigField):

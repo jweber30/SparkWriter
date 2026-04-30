@@ -214,9 +214,7 @@
             "description": "Use full-width layout (for multiline)"
           },
           "standard_field": {
-            "type": "string",
-            "description": "Optional semantic field identifier for cross-plugin orchestration/profile reuse",
-            "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+            "$ref": "#/definitions/standard_field"
           },
           "storage": {
             "$ref": "#/definitions/storage_hint"
@@ -240,6 +238,20 @@
           }
         }
       }
+    },
+    "wizard": {
+      "type": "object",
+      "description": "Optional wizard page layout for manifest configuration fields",
+      "properties": {
+        "pages": {
+          "type": "array",
+          "description": "Ordered wizard pages. Field IDs must refer to entries in config_fields.",
+          "items": {
+            "$ref": "#/definitions/wizard_page"
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "assets": {
       "type": "object",
@@ -450,6 +462,32 @@
         }
       }
     },
+    "wizard_page": {
+      "type": "object",
+      "required": ["id", "title", "fields"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable page identifier",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Page title"
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional page helper text"
+        },
+        "fields": {
+          "type": "array",
+          "description": "Ordered config field IDs shown on this page",
+          "items": {"type": "string"},
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
     "asset": {
       "type": "object",
       "required": ["path"],
@@ -529,8 +567,8 @@
         },
         "scope": {
           "type": "string",
-          "enum": ["user", "workspace", "plugin", "session", "ephemeral"],
-          "description": "Suggested persistence scope"
+          "enum": ["profile", "user", "workspace", "plugin", "session", "ephemeral"],
+          "description": "Suggested persistence scope. Use profile for reusable installer identity/network defaults."
         },
         "secret": {
           "type": "boolean",
@@ -539,6 +577,20 @@
         }
       },
       "additionalProperties": false
+    },
+    "standard_field": {
+      "type": "string",
+      "description": "Known semantic field identifier that hosts may offer to auto-fill from profile-level saved values after user confirmation.",
+      "enum": [
+        "user.name",
+        "user.email",
+        "user.ssh_public_keys",
+        "network.hostname",
+        "network.wifi.ssid",
+        "network.wifi.password",
+        "locale.timezone",
+        "locale.keyboard"
+      ]
     }
   }
 }

@@ -403,6 +403,26 @@ def test_schema_requires_install_disclosure_fields_for_commands():
     assert "allow_plugin_specific" in required
 
 
+def test_schema_declares_wizard_pages():
+    schema_path = (
+        PACKAGE_ROOT
+        / "src"
+        / "spark_writer"
+        / "plugins"
+        / "schema"
+        / "sparkplug_manifest.schema.json"
+    )
+
+    with open(schema_path, "r", encoding="utf-8") as f:
+        schema = json.load(f)
+
+    wizard = schema["properties"]["wizard"]
+    page = schema["definitions"]["wizard_page"]
+
+    assert "pages" in wizard["properties"]
+    assert {"id", "title", "fields"}.issubset(set(page["required"]))
+
+
 def test_manifest_commands_include_disclosure_metadata(proxmox_manifest):
     """Install-time command warning UI needs command description and install guidance."""
     commands = proxmox_manifest.get("requires", {}).get("commands", [])

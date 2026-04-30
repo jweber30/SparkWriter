@@ -16,11 +16,14 @@ class Downloader:
         self.session.listen_on(6881, 6891)
         self.handle = None
         self.is_downloading = False
+        self._stop_requested = False
         self.progress_callback = None
         self.completion_callback = None
         self.error_callback = None
 
     def start_download(self, url, save_name, on_progress=None, on_complete=None, on_error=None):
+        self._stop_requested = False
+        self.is_downloading = True
         self.progress_callback = on_progress
         self.completion_callback = on_complete
         self.error_callback = on_error
@@ -58,10 +61,13 @@ class Downloader:
             else:
                 raise ValueError("Could not parse download URL: {}".format(url))
 
+            if self._stop_requested:
+                return
             self.is_downloading = True
             self._monitor_download(save_name)
             
         except Exception as e:
+            self.is_downloading = False
             if self.error_callback:
                 # Ensure callback runs on main thread if needed, but usually callbacks handle GLib.idle_add
                 self.error_callback(str(e))
@@ -77,6 +83,9 @@ class Downloader:
                 dl = 0
                 with open(local_filename, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=8192):
+                        if self._stop_requested or not self.is_downloading:
+                            logger.info("HTTP download paused: %s", local_filename)
+                            return
                         if chunk: 
                             dl += len(chunk)
                             f.write(chunk)
@@ -84,9 +93,11 @@ class Downloader:
                                 GLib.idle_add(self.progress_callback, (dl / total_length) * 100, 0, "Downloading")
             
             logger.info("HTTP download complete: %s", local_filename)
+            self.is_downloading = False
             if self.completion_callback:
                 GLib.idle_add(self.completion_callback, local_filename)
         except Exception as e:
+            self.is_downloading = False
             if self.error_callback:
                 GLib.idle_add(self.error_callback, str(e))
 
@@ -122,9 +133,23 @@ class Downloader:
             time.sleep(1)
 
     def cancel(self):
+        self._stop_requested = True
         self.is_downloading = False
         if self.handle:
             self.session.remove_torrent(self.handle)
+
+    def pause(self):
+        self._stop_requested = True
+        self.is_downloading = False
+        if self.handle:
+            try:
+                self.handle.pause()
+            except Exception:
+                logger.debug("Unable to pause torrent handle", exc_info=True)
+            try:
+                self.session.remove_torrent(self.handle)
+            finally:
+                self.handle = None
 
     def _resolve_completed_target(self, torrent_info: lt.torrent_info) -> Optional[str]:
         storage = torrent_info.files()

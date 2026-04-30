@@ -124,6 +124,56 @@ def test_plugin_manager_detects_conflicting_selection(tmp_path):
     assert "hostname" in conflict
 
 
+def test_json_plugin_exposes_manifest_wizard_pages(tmp_path):
+    manifest = {
+        "version": "1.0",
+        "metadata": {"id": "wizard-demo", "name": "Wizard Demo"},
+        "requires": {"commands": []},
+        "config_fields": [
+            {"id": "hostname", "label": "Hostname", "type": "text"},
+        ],
+        "wizard": {
+            "pages": [
+                {
+                    "id": "identity",
+                    "title": "Identity",
+                    "fields": ["hostname"],
+                }
+            ]
+        },
+    }
+
+    plugin = _write_plugin(tmp_path, "wizard-demo", manifest)
+
+    assert plugin.is_available
+    assert plugin.get_wizard_pages()[0]["id"] == "identity"
+
+
+def test_json_plugin_rejects_unknown_wizard_field(tmp_path):
+    manifest = {
+        "version": "1.0",
+        "metadata": {"id": "bad-wizard", "name": "Bad Wizard"},
+        "requires": {"commands": []},
+        "config_fields": [
+            {"id": "hostname", "label": "Hostname", "type": "text"},
+        ],
+        "wizard": {
+            "pages": [
+                {
+                    "id": "identity",
+                    "title": "Identity",
+                    "fields": ["missing"],
+                }
+            ]
+        },
+    }
+
+    plugin = _write_plugin(tmp_path, "bad-wizard", manifest)
+
+    assert not plugin.is_available
+    assert "unknown field 'missing'" in (plugin.unavailable_reason or "")
+
+
 def test_builtin_ubuntu_autoinstall_uses_source_compatibility(ubuntu_autoinstall_plugin):
     assert ubuntu_autoinstall_plugin.should_show_ui(
         "ubuntu-24.04-server",

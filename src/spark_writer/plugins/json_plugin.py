@@ -1,16 +1,14 @@
 """JSON-based SparkPlug runtime implementation."""
 
-import hashlib
 import importlib.metadata
 import json
 import logging
-import os
 import secrets
 import shutil
 import string
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from usb_writer_core import receipts as receipt_utils
 from usb_writer_core import writer as usb_writer
@@ -18,20 +16,26 @@ from usb_writer_core import writer as usb_writer
 from .action_context import (
     ActionContext,
     ManifestArtifact,
-    PendingPhaseApproval,
     RuntimeApprovalRequiredError,
 )
-from .base import ConfigField, ConfigOption, PluginEventType, SparkPlug
-from .manifest_assets import normalize_sidecar_ref, resolve_asset_path
+from .base import PluginEventType, SparkPlug
+from .json_plugin_approvals import APPROVAL_MODEL_VERSION, JsonPluginApprovalMixin
+from .json_plugin_presets import JsonPluginPresetMixin
+from .json_plugin_templates import JsonPluginTemplateMixin
 from .template_engine import SparkTemplateEngine
 from . import installer_schemes
 
 logger = logging.getLogger(__name__)
 
-APPROVAL_MODEL_VERSION = "invocation-v2"
+__all__ = ["APPROVAL_MODEL_VERSION", "JsonSparkPlug", "RuntimeApprovalRequiredError"]
 
 
-class JsonSparkPlug(SparkPlug):
+class JsonSparkPlug(
+    JsonPluginApprovalMixin,
+    JsonPluginPresetMixin,
+    JsonPluginTemplateMixin,
+    SparkPlug,
+):
     """SparkPlug implementation that executes JSON manifests.
     
     This class provides a secure runtime for declarative plugin manifests,
@@ -137,6 +141,12 @@ class JsonSparkPlug(SparkPlug):
             self._unavailable_reason = action_error
             return
 
+        wizard_error = self._validate_manifest_wizard()
+        if wizard_error:
+            self._available = False
+            self._unavailable_reason = wizard_error
+            return
+
         # Check for required external commands
         self._evaluate_availability()
 
@@ -156,144 +166,54 @@ class JsonSparkPlug(SparkPlug):
                     return f"Action {action_id}: unsupported action type '{action_type}'"
 
         return None
-    
-    def _load_approved_commands(self) -> None:
-        """Load user-approved commands from invocation-time approval metadata."""
-        plugin_id = self._plugin_id()
-        if not plugin_id:
-            return
 
-        candidates = [self._approval_file_path(), self._legacy_approval_file_path()]
-        loaded_any = False
-        for approval_file in candidates:
-            if not approval_file or not os.path.exists(approval_file):
-                continue
+    def _validate_manifest_wizard(self) -> Optional[str]:
+        """Return an availability error string for invalid wizard page metadata."""
 
-            try:
-                with open(approval_file, 'r', encoding='utf-8') as f:
-                    approval_data = json.load(f)
+        wizard = self.manifest.get("wizard", {})
+        if not wizard:
+            return None
+        if not isinstance(wizard, dict):
+            return "Manifest wizard must be an object"
 
-                approval_model = approval_data.get('approval_model')
-                if approval_model != APPROVAL_MODEL_VERSION:
-                    logger.info(
-                        f"Ignoring legacy approval file for {plugin_id}; "
-                        f"expected model {APPROVAL_MODEL_VERSION}"
-                    )
-                    continue
+        pages = wizard.get("pages", [])
+        if not pages:
+            return None
+        if not isinstance(pages, list):
+            return "Manifest wizard.pages must be an array"
 
-                approved = approval_data.get('approved_commands', [])
-                self._plugin_allowed_commands.update(approved)
-                loaded_any = True
+        field_ids = {
+            str(field.get("id", "")).strip()
+            for field in self.manifest.get("config_fields", [])
+            if isinstance(field, dict) and str(field.get("id", "")).strip()
+        }
+        page_ids: set[str] = set()
+        seen_fields: set[str] = set()
+        for idx, page in enumerate(pages, start=1):
+            if not isinstance(page, dict):
+                return f"Manifest wizard page {idx} must be an object"
+            page_id = str(page.get("id", "")).strip()
+            if not page_id:
+                return f"Manifest wizard page {idx} requires id"
+            if page_id in page_ids:
+                return f"Manifest wizard page '{page_id}' is duplicated"
+            page_ids.add(page_id)
 
-                if approved:
-                    logger.info(f"Loaded approved commands for {plugin_id}: {', '.join(approved)}")
+            fields = page.get("fields", [])
+            if not isinstance(fields, list):
+                return f"Manifest wizard page '{page_id}' fields must be an array"
+            for raw_field_id in fields:
+                field_id = str(raw_field_id).strip()
+                if field_id not in field_ids:
+                    return f"Manifest wizard page '{page_id}' references unknown field '{field_id}'"
+                if field_id in seen_fields:
+                    return f"Manifest wizard field '{field_id}' is listed more than once"
+                seen_fields.add(field_id)
 
-            except (OSError, json.JSONDecodeError) as e:
-                logger.error(f"Failed to load approval file for {plugin_id}: {e}")
-
-        if not loaded_any:
-            logger.debug(f"No approval file found for {plugin_id}")
+        return None
 
     def _plugin_id(self) -> str:
         return str(self.manifest.get('metadata', {}).get('id', '')).strip()
-
-    def _approval_file_path(self) -> Optional[str]:
-        plugin_id = self._plugin_id()
-        if not plugin_id:
-            return None
-        state_home = os.environ.get("XDG_STATE_HOME")
-        if not state_home:
-            state_home = os.path.join(os.path.expanduser("~"), ".local", "state")
-        return os.path.join(state_home, "spark-writer", "approvals", f".{plugin_id}.approval")
-
-    def _legacy_approval_file_path(self) -> Optional[str]:
-        plugin_id = self._plugin_id()
-        if not plugin_id:
-            return None
-        manifest_dir = os.path.dirname(self.manifest_path)
-        return os.path.join(manifest_dir, f".{plugin_id}.approval")
-
-    def get_pending_phase_approval(self, phase_name: str) -> Optional[PendingPhaseApproval]:
-        """Return pending approval data for a lifecycle phase if commands are unapproved."""
-        actions = self.manifest.get('actions', {}).get(phase_name, [])
-        if not actions:
-            return None
-        phase_commands = self._collect_phase_commands(actions)
-        pending = [cmd for cmd in phase_commands if cmd not in self._plugin_allowed_commands]
-        if not pending:
-            return None
-        return PendingPhaseApproval(phase_name, pending)
-
-    def approve_runtime_commands(self, commands: list[str]) -> None:
-        """Persist and activate newly approved runtime commands for this plugin."""
-
-        plugin_id = self._plugin_id()
-        approval_file = self._approval_file_path()
-        if not plugin_id or not approval_file:
-            raise RuntimeError("Plugin metadata.id is required to persist runtime approvals")
-
-        normalized = {str(cmd).strip() for cmd in commands if str(cmd).strip()}
-        merged = sorted(self._plugin_allowed_commands.union(normalized))
-
-        payload = {
-            "plugin_id": plugin_id,
-            "approval_model": APPROVAL_MODEL_VERSION,
-            "approved_commands": merged,
-        }
-
-        try:
-            approval_dir = os.path.dirname(approval_file)
-            os.makedirs(approval_dir, exist_ok=True)
-            with open(approval_file, 'w', encoding='utf-8') as f:
-                json.dump(payload, f, indent=2)
-        except OSError as exc:
-            raise RuntimeError(f"Failed to persist runtime approval for {plugin_id}: {exc}") from exc
-
-        self._plugin_allowed_commands.update(merged)
-        if normalized:
-            logger.info(
-                "Persisted runtime approval for %s: %s",
-                plugin_id,
-                ", ".join(sorted(normalized)),
-            )
-
-    def _collect_phase_commands(self, actions: list[dict[str, Any]]) -> list[str]:
-        """Return unique executable names used by run_command actions in order."""
-
-        phase_commands: list[str] = []
-        seen: set[str] = set()
-        for action in actions:
-            cmd_name = self._command_name_for_action(action)
-            if isinstance(cmd_name, str) and cmd_name and cmd_name not in seen:
-                seen.add(cmd_name)
-                phase_commands.append(cmd_name)
-        return phase_commands
-
-    def _command_name_for_action(self, action: dict[str, Any]) -> Optional[str]:
-        action_type = action.get('type')
-        if action_type == 'run_command':
-            command = action.get('command') or []
-            if command and isinstance(command[0], str):
-                return command[0]
-            return None
-        if action_type == 'prepare_proxmox_auto_install_iso':
-            return self._PROXMOX_WRAPPER_COMMAND
-        return None
-
-    def _build_runtime_approval_error(self, pending: PendingPhaseApproval) -> RuntimeApprovalRequiredError:
-        return RuntimeApprovalRequiredError(self._plugin_id(), pending)
-
-    def _current_phase_name(self) -> str:
-        return self._active_phase_name or "current"
-
-    def _ensure_phase_runtime_approval(self, phase_name: str, actions: list[dict[str, Any]]) -> None:
-        """Require runtime approval for all pending commands in a lifecycle phase."""
-
-        phase_commands = self._collect_phase_commands(actions)
-        pending = [cmd for cmd in phase_commands if cmd not in self._plugin_allowed_commands]
-        if not pending:
-            return
-        raise self._build_runtime_approval_error(PendingPhaseApproval(phase_name, pending))
 
     def _detect_spark_writer_version(self) -> str:
         """Return the installed spark-writer package version if available."""
@@ -359,305 +279,18 @@ class JsonSparkPlug(SparkPlug):
         actions = self.manifest.get('actions', {})
         return bool(actions.get('on_iso_ready'))
 
-    def register_presets(self) -> Dict[str, Any]:
-        """Return presets defined in manifest, including those from remote feeds."""
-        presets = {}
-        
-        # Load presets from remote feeds first
-        for feed_spec in self.manifest.get('preset_feeds', []):
-            feed_url = feed_spec.get('url', '')
-            if not feed_url.startswith('https://'):
-                logger.warning(f"Skipping non-HTTPS feed: {feed_url}")
-                continue
-                
-            try:
-                feed_presets = self._fetch_preset_feed(feed_url)
-                presets.update(feed_presets)
-                logger.info(f"Loaded {len(feed_presets)} presets from {feed_url}")
-            except Exception as e:
-                logger.error(f"Failed to fetch preset feed {feed_url}: {e}")
-                # Continue loading other feeds
-        
-        # Load static presets from manifest (these override feed presets)
-        for preset in self.manifest.get('presets', []):
-            preset_id = preset.get('id')
-            if preset_id:
-                presets[preset_id] = {
-                    'name': preset.get('name', ''),
-                    'url': preset.get('url', ''),
-                    'sha256': preset.get('sha256', ''),
-                    'distro': preset.get('distro', ''),
-                    **preset.get('metadata', {})
-                }
-        return presets
-    
-    def _fetch_preset_feed(self, feed_url: str) -> Dict[str, Any]:
-        """Fetch and parse a JSON Feed 1.1 preset feed.
-        
-        Args:
-            feed_url: HTTPS URL of the feed
-            
-        Returns:
-            Dictionary of presets {id: {name, url, sha256, distro, ...}}
-        """
-        import json
-        try:
-            import requests
-        except ImportError:
-            logger.warning("requests library not available, skipping feed fetch")
-            return {}
-        
-        try:
-            response = requests.get(feed_url, timeout=10)
-            response.raise_for_status()
-            feed = response.json()
-            
-            # Validate JSON Feed structure
-            if feed.get('version') != 'https://jsonfeed.org/version/1.1':
-                logger.warning(f"Unknown feed version: {feed.get('version')}")
-            
-            presets = {}
-            for item in feed.get('items', []):
-                # Extract preset ID from item.id (format: "preset:ubuntu-24.04")
-                item_id = item.get('id', '')
-                if not item_id.startswith('preset:'):
-                    continue
-                preset_id = item_id.replace('preset:', '', 1)
-                
-                # Find download URLs from attachments
-                url = ''
-                sha256 = ''
-                for attachment in item.get('attachments', []):
-                    mime = attachment.get('mime_type', '')
-                    title = attachment.get('title', '')
-                    
-                    # Prefer torrent, fallback to direct ISO
-                    if 'torrent' in mime or 'torrent' in title.lower():
-                        url = attachment.get('url', '')
-                    elif not url and ('iso' in title.lower() or 'octet-stream' in mime):
-                        url = attachment.get('url', '')
-                    
-                    # Extract checksum if provided
-                    if 'sha256' in attachment:
-                        sha256 = attachment['sha256']
-                
-                if not url:
-                    logger.warning(f"No download URL found for preset {preset_id}")
-                    continue
-                
-                # Extract distro from tags
-                distro = ''
-                tags = item.get('tags', [])
-                distro_tags = ['ubuntu', 'debian', 'proxmox', 'fedora', 'arch']
-                for tag in tags:
-                    if tag.lower() in distro_tags:
-                        distro = tag.lower()
-                        break
-                
-                presets[preset_id] = {
-                    'name': item.get('title', preset_id),
-                    'url': url,
-                    'sha256': sha256,
-                    'distro': distro,
-                    'description': item.get('summary', ''),
-                }
-            
-            return presets
-            
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"Failed to fetch feed: {e}")
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"Invalid JSON in feed: {e}")
-
     def get_config_fields(self) -> List[Dict[str, Any]]:
         """Return config fields from manifest."""
         return self.manifest.get('config_fields', [])
 
-    def should_show_ui(self, preset_id: str, preset_data: Dict[str, Any]) -> bool:
-        """Determine if plugin UI should be shown based on manifest rules."""
-        visibility = self.manifest.get('ui_visibility', {}).get('when', {})
-
-        source_id = str(
-            preset_data.get('source_id') or preset_data.get('id') or preset_id or ''
-        ).strip()
-        source_family = str(
-            preset_data.get('source_family') or preset_data.get('family') or preset_data.get('distro') or ''
-        ).lower()
-        installer_scheme = str(preset_data.get('installer_scheme') or '').strip()
-        source_capabilities = {
-            str(item).strip()
-            for item in preset_data.get('source_capabilities', preset_data.get('capabilities', []))
-            if str(item).strip()
-        }
-
-        allowed_source_ids = visibility.get('source_id', [])
-        if allowed_source_ids and source_id not in allowed_source_ids:
-            return False
-
-        allowed_source_families = visibility.get('source_family', [])
-        if allowed_source_families:
-            if source_family not in [str(item).lower() for item in allowed_source_families]:
-                return False
-
-        allowed_schemes = visibility.get('installer_scheme', [])
-        if allowed_schemes and installer_scheme not in allowed_schemes:
-            return False
-
-        required_capabilities = visibility.get('source_capabilities', [])
-        if required_capabilities:
-            normalized_requirements = {
-                str(item).strip() for item in required_capabilities if str(item).strip()
-            }
-            if not normalized_requirements.issubset(source_capabilities):
-                return False
-
-        # Compatibility aliases for legacy manifests.
-        allowed_distros = visibility.get('preset_distro', [])
-        if allowed_distros:
-            if source_family not in [str(d).lower() for d in allowed_distros]:
-                return False
-
-        allowed_presets = visibility.get('preset_id', [])
-        if allowed_presets and source_id not in allowed_presets:
-            return False
-
-        return True
-
-    def _evaluate_condition(self, condition: Dict[str, Any], ui_values: Dict[str, Any]) -> bool:
-        """Evaluate a conditional expression.
-        
-        Args:
-            condition: Condition dict with 'field', 'operator', and optional 'value'
-            ui_values: User-provided config values
-            
-        Returns:
-            True if condition matches, False otherwise
-        """
-        field_id = condition.get('field')
-        operator = condition.get('operator')
-        expected = condition.get('value')
-        
-        if not field_id or not operator:
-            return True  # Invalid condition defaults to true
-        
-        actual = ui_values.get(field_id)
-        
-        if operator == 'not_empty':
-            return bool(actual and str(actual).strip())
-        elif operator == 'empty':
-            return not actual or not str(actual).strip()
-        elif operator == 'equals':
-            return actual == expected
-        elif operator == 'not_equals':
-            return actual != expected
-        elif operator == 'in':
-            return actual in (expected if isinstance(expected, list) else [expected])
-        elif operator == 'not_in':
-            return actual not in (expected if isinstance(expected, list) else [expected])
-        
-        return True
-
-    def _resolve_template_string(self, template_value: Any) -> str:
-        """Resolve a template value to a string ready for rendering.
-
-        Three forms are accepted:
-        - str  — used as-is (legacy / inline)
-        - list — joined with newlines (one element per line for readability)
-        - dict with "file" key — loaded from a path relative to the manifest
-        - dict with "asset" key — loaded via manifest assets registry
-        """
-        if isinstance(template_value, str):
-            return template_value
-        if isinstance(template_value, list):
-            return "\n".join(str(line) for line in template_value)
-        if isinstance(template_value, dict):
-            assets = self.manifest.get("assets", {})
-            if assets is None:
-                assets = {}
-            if not isinstance(assets, dict):
-                raise ValueError("Manifest assets section must be an object")
-
-            file_ref = template_value.get("file")
-            asset_ref = template_value.get("asset")
-
-            if file_ref and asset_ref:
-                raise ValueError("Template dict must not define both 'file' and 'asset'")
-            if file_ref:
-                relative_path = normalize_sidecar_ref(file_ref)
-            elif asset_ref:
-                relative_path = resolve_asset_path(assets, asset_ref)
-            else:
-                raise ValueError("Template dict must have a 'file' or 'asset' key")
-
-            manifest_dir = os.path.dirname(os.path.abspath(self.manifest_path))
-            sidecar_path = os.path.join(manifest_dir, relative_path)
-            try:
-                with open(sidecar_path, "r", encoding="utf-8") as fh:
-                    return fh.read()
-            except OSError as exc:
-                raise ValueError(f"Cannot read template file '{relative_path}': {exc}") from exc
-        raise ValueError(f"Unsupported template value type: {type(template_value).__name__}")
-
-    def _render_value(self, value: Any, context: Dict[str, Any]) -> Any:
-        """Render template values recursively."""
-
-        if isinstance(value, str):
-            return self.template_engine.render(value, context)
-        if isinstance(value, dict):
-            return {k: self._render_value(v, context) for k, v in value.items()}
-        if isinstance(value, list):
-            return [self._render_value(item, context) for item in value]
-        return value
-
-    def _render_mapping(self, mapping: Optional[Dict[str, Any]], context: Dict[str, Any]) -> Dict[str, Any]:
-        if not mapping:
-            return {}
-        return {key: self._render_value(val, context) for key, val in mapping.items()}
-
-    def _config_field_defaults(self) -> Dict[str, Any]:
-        """Return default values for declared config fields."""
-
-        defaults: Dict[str, Any] = {}
-        for field in self.manifest.get('config_fields', []):
-            field_id = field.get('id')
-            if not field_id:
-                continue
-            defaults[str(field_id)] = field.get('default', '')
-        return defaults
-
-    def _build_template_context(
-        self,
-        ui_values: Dict[str, Any],
-        preset: Dict[str, Any],
-        iso_path: Optional[str],
-        device_path: Optional[str],
-    ) -> Dict[str, Any]:
-        """Build template context with declared-field defaults and runtime values."""
-
-        context = {
-            **self._config_field_defaults(),
-            **ui_values,
-            **self._exec_ctx.action_vars,
-            'iso_path': iso_path,
-            'device_path': device_path,
-            'preset_id': preset.get('id', ''),
-            'preset_name': preset.get('name', ''),
-            'source_id': preset.get('source_id', preset.get('id', '')),
-            'source_name': preset.get('source_name', preset.get('name', '')),
-            'source_family': preset.get('source_family', preset.get('family', preset.get('distro', ''))),
-            'source_url': preset.get('source_url', preset.get('url', '')),
-            'source_version': preset.get('source_version', preset.get('version', '')),
-            'installer_scheme': preset.get('installer_scheme', ''),
-            'source_capabilities': preset.get('source_capabilities', preset.get('capabilities', [])),
-        }
-
-        # Compatibility bridge for legacy template key naming.
-        if 'apt-cache' not in context and 'apt-proxy' in context:
-            context['apt-cache'] = context.get('apt-proxy', '')
-        if 'apt-proxy' not in context and 'apt-cache' in context:
-            context['apt-proxy'] = context.get('apt-cache', '')
-
-        return context
+    def get_wizard_pages(self) -> List[Dict[str, Any]]:
+        wizard = self.manifest.get("wizard", {})
+        if not isinstance(wizard, dict):
+            return []
+        pages = wizard.get("pages", [])
+        if not isinstance(pages, list):
+            return []
+        return [page for page in pages if isinstance(page, dict)]
 
     def _reset_phase_state(self, initial_action_vars: Optional[Dict[str, Any]] = None) -> None:
         self._exec_ctx.active_phase = self._active_phase_name or "current"
@@ -665,24 +298,6 @@ class JsonSparkPlug(SparkPlug):
 
     def _clear_phase_state(self) -> None:
         self._exec_ctx.clear()
-
-    def _hash_file(self, file_path: Path, algorithm: str) -> str:
-        """Return hex digest for the provided file."""
-
-        if not file_path.exists():
-            raise RuntimeError(f"File not found: {file_path}")
-
-        try:
-            digest = hashlib.new(algorithm)
-        except ValueError as exc:
-            raise RuntimeError(f"Unsupported hash algorithm: {algorithm}") from exc
-
-        with file_path.open('rb') as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
-                if not chunk:
-                    break
-                digest.update(chunk)
-        return digest.hexdigest()
 
     def _handle_render_template(
         self, action: Dict[str, Any], context: Dict[str, Any]
