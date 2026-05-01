@@ -30,5 +30,4 @@ debian/*.prerm.debhelper
 
 
 *.txt
-*.md
 *.json
