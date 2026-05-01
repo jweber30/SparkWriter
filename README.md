@@ -6,7 +6,7 @@ A native GTK4/LibAdwaita application designed to be modular and lightweight.
 
 This README is the practical usage and development guide.
 
-- Treat the SparkPlug author reference in `docs/SPARKPLUG_AUTHORING.md` as the normative authoring guide.
+- Treat `docs/SPARKWRITER_MANIFEST_AUTHORING.md` as the normative authoring guide for the SparkWriter manifest format.
 - Treat the JSON schema and current test suite as the strongest implementation contract.
 - Treat policy sections here as implementation notes unless they are explicitly marked stable.
 
@@ -16,7 +16,7 @@ If a README statement conflicts with code/tests, prefer code/tests and open a do
 
 SparkWriter is a **modular USB provisioning tool** for bare-metal infrastructure. It:
 
-1. Loads JSON "SparkPlug" manifests that define presets (ISOs) and automation workflows
+1. Loads JSON SparkWriter manifests that define presets (ISOs) and automation workflows
 2. Generates dynamic forms based on manifest `config_fields` to collect user input
 3. Renders templates using the collected data
 4. Executes lifecycle actions (before/after write)
@@ -31,11 +31,11 @@ SparkWriter is a **modular USB provisioning tool** for bare-metal infrastructure
 - Automated hardware imaging pipelines
 - Chrome OS Crostini-friendly USB creation
 
-## SparkPlug Overview
+## Manifest Overview
 
-SparkPlugs are JSON manifests that extend SparkWriter with presets, forms, and lifecycle actions.
+SparkWriter manifests are JSON files that extend SparkWriter with presets, forms, and lifecycle actions.
 
-External authors should use `docs/SPARKPLUG_AUTHORING.md` for the current manifest and runtime contract.
+External authors should use `docs/SPARKWRITER_MANIFEST_AUTHORING.md` for the current manifest and runtime contract.
 
 ### Publisher Quickstart (2 Minutes)
 
@@ -57,12 +57,12 @@ Current publishing recommendation:
 
 - Publish over HTTPS.
 - Keep `metadata.id` stable across releases.
-- If you host on GitHub, sign the manifest as described in `docs/SPARKPLUG_AUTHORING.md`.
+- If you host on GitHub, sign the manifest as described in `docs/SPARKWRITER_MANIFEST_AUTHORING.md`.
 - Test both local-file install and URL install before sharing a link.
 
-### SparkPlug Authoring Reference
+### Manifest Authoring Reference
 
-The detailed SparkPlug specification now lives in `docs/SPARKPLUG_AUTHORING.md`.
+The detailed SparkWriter manifest specification now lives in `docs/SPARKWRITER_MANIFEST_AUTHORING.md`.
 
 That document covers:
 
@@ -92,12 +92,12 @@ This works on:
 
 ### For Users: Clickable Links
 
-Share plugin manifests with users as direct links. They don't need to copy-paste—just click:
+Share SparkWriter manifests with users as direct links. They don't need to copy-paste, just click:
 
 ```html
 <!-- Example: embed in a website -->
 <a href="spark://plugin/add?manifest=https://example.com/my-plugin.json">
-    Install My SparkWriter Plugin
+    Install My SparkWriter Manifest
 </a>
 ```
 
@@ -153,7 +153,7 @@ Current behavior:
 - Approved commands are persisted under `XDG_STATE_HOME/spark-writer/approvals/` or `~/.local/state/spark-writer/approvals/` when `XDG_STATE_HOME` is unset.
 - Legacy approval files next to the manifest are ignored unless they use the current `invocation-v2` approval model.
 
-For exact approval file shape and phase behavior, use `docs/SPARKPLUG_AUTHORING.md`.
+For exact approval file shape and phase behavior, use `docs/SPARKWRITER_MANIFEST_AUTHORING.md`.
 
 ## Development
 
