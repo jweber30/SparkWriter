@@ -19,7 +19,7 @@ from .plugins.json_plugin import RuntimeApprovalRequiredError
 from .plugins.manager import PluginManager
 from .profile import ProfileStore
 from .receipts import build_receipt_payload
-from .sources import Source, SourceCatalog
+from .sources import Source
 from .core.downloader import Downloader
 
 logger = logging.getLogger(__name__)
@@ -122,7 +122,6 @@ class SparkWindow(Adw.ApplicationWindow):
         
         # Managers
         self._plugin_manager = PluginManager()
-        self._source_catalog = SourceCatalog()
         self._form_builder = ConfigFormBuilder(on_change_callback=self._update_flash_button_state)
         self._profile_store = ProfileStore()
         self.downloader = Downloader(os.path.expanduser("~/ISO-Downloads"))
@@ -196,7 +195,7 @@ class SparkWindow(Adw.ApplicationWindow):
         self._load_all_sources()
 
     def _load_all_sources(self):
-        self.all_sources = self._source_catalog.list_sources()
+        self.all_sources = self._plugin_manager.get_manifest_sources()
         model = Gtk.StringList()
 
         for source in self.all_sources:
@@ -1504,6 +1503,7 @@ class SparkWindow(Adw.ApplicationWindow):
                 required_fields_filled = False
         has_source = bool(self.all_sources) and self.current_source is not None
         save_supported = all(plugin.supports_save_iso() for plugin in self.selected_sparkplugs)
+        usb_supported = all(plugin.supports_usb_write() for plugin in self.selected_sparkplugs)
         early_supported = self._supports_early_download(self.current_source)
 
         if hasattr(self, "_download_continue_btn"):
@@ -1532,6 +1532,8 @@ class SparkWindow(Adw.ApplicationWindow):
             and required_fields_filled
             and not self._selection_error
             and not self._flash_in_progress
+            and usb_supported
+            and bool(self.current_source and self.current_source.can_write_usb)
         )
         self._flash_btn.set_sensitive(flash_enabled)
         
@@ -1542,12 +1544,15 @@ class SparkWindow(Adw.ApplicationWindow):
             and not self._selection_error
             and not self._flash_in_progress
             and save_supported
+            and bool(self.current_source and self.current_source.can_export_iso)
         )
         self._save_iso_btn.set_sensitive(save_enabled)
         
         # Update tooltips
         if self._selection_error:
             self._save_iso_btn.set_tooltip_text(self._selection_error)
+        elif self.current_source and not self.current_source.can_export_iso:
+            self._save_iso_btn.set_tooltip_text("This manifest does not export an ISO")
         elif not save_supported:
             self._save_iso_btn.set_tooltip_text(
                 "One or more selected SparkPlugs require USB device operations "

@@ -137,6 +137,11 @@ class JsonPluginApprovalMixin:
             return None
         if action_type == 'prepare_proxmox_auto_install_iso':
             return self._PROXMOX_WRAPPER_COMMAND
+        if (
+            action_type == 'prepare_installer_iso'
+            and str(action.get('installer_scheme', '')).strip() == 'proxmox-auto-install'
+        ):
+            return self._PROXMOX_WRAPPER_COMMAND
         return None
 
     def _build_runtime_approval_error(self, pending: PendingPhaseApproval) -> RuntimeApprovalRequiredError:

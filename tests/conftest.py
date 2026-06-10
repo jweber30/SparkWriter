@@ -17,10 +17,16 @@ from spark_writer.plugins.json_plugin import JsonSparkPlug
 
 @pytest.fixture
 def proxmox_manifest_path():
-    """Return path to the Proxmox Tailscale test manifest."""
-    manifest_path = Path(__file__).parent / "proxmox-tailscale.json"
+    """Return path to the built-in Proxmox Tailscale manifest."""
+    manifest_path = (
+        SRC_ROOT
+        / "spark_writer"
+        / "plugins"
+        / "installed"
+        / "proxmox-tailscale.json"
+    )
     if not manifest_path.exists():
-        pytest.skip("Proxmox manifest not found in tests/")
+        pytest.skip("Proxmox manifest not found in installed plugins")
     return manifest_path
 
 

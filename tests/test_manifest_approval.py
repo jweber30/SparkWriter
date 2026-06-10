@@ -8,6 +8,7 @@ These tests intentionally encode the target behavior for a migration where:
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -421,6 +422,28 @@ def test_schema_declares_wizard_pages():
 
     assert "pages" in wizard["properties"]
     assert {"id", "title", "fields"}.issubset(set(page["required"]))
+
+
+def test_schema_allows_dotted_preset_ids():
+    schema_path = (
+        PACKAGE_ROOT
+        / "src"
+        / "spark_writer"
+        / "plugins"
+        / "schema"
+        / "sparkplug_manifest.schema.json"
+    )
+
+    with open(schema_path, "r", encoding="utf-8") as f:
+        schema = json.load(f)
+
+    preset_id_pattern = schema["properties"]["presets"]["items"]["properties"]["id"]["pattern"]
+
+    assert re.fullmatch(preset_id_pattern, "proxmox-ve-9.1")
+    assert re.fullmatch(preset_id_pattern, "ubuntu-24.04-server")
+    assert re.fullmatch(preset_id_pattern, "debian-live-12")
+    assert not re.fullmatch(preset_id_pattern, "Proxmox-VE-9.1")
+    assert not re.fullmatch(preset_id_pattern, "proxmox-ve-9..1")
 
 
 def test_manifest_commands_include_disclosure_metadata(proxmox_manifest):

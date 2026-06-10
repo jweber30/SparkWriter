@@ -12,6 +12,61 @@ class JsonPluginPresetMixin:
 
     manifest: dict[str, Any]
 
+    def _manifest_outputs(self) -> Dict[str, bool]:
+        outputs = self.manifest.get('outputs', {})
+        if not isinstance(outputs, dict):
+            outputs = {}
+        return {
+            'usb': bool(outputs.get('usb', True)),
+            'iso': bool(outputs.get('iso', True)),
+        }
+
+    def _plugin_id_for_source(self) -> str:
+        metadata = self.manifest.get('metadata', {})
+        return str(metadata.get('id') or metadata.get('name') or '').strip()
+
+    def register_sources(self) -> list[Dict[str, Any]]:
+        """Return manifest-owned installation Sources.
+
+        New manifests should define one top-level ``source``. Legacy manifests
+        that still declare ``presets`` are normalized into Source-shaped records
+        so older installs continue to appear in the UI.
+        """
+        sources: list[Dict[str, Any]] = []
+        outputs = self._manifest_outputs()
+        owner_id = self._plugin_id_for_source()
+
+        source = self.manifest.get('source')
+        if isinstance(source, dict) and source.get('id'):
+            normalized = dict(source)
+            normalized.setdefault('sparkplug_id', owner_id)
+            normalized.setdefault('outputs', outputs)
+            sources.append(normalized)
+            return sources
+
+        for preset_id, preset in self.register_presets().items():
+            normalized = {
+                'id': preset_id,
+                'name': preset.get('name', preset_id),
+                'url': preset.get('url', ''),
+                'family': preset.get('family') or preset.get('distro', ''),
+                'sha256': preset.get('sha256', ''),
+                'installer_scheme': preset.get('installer_scheme', ''),
+                'capabilities': preset.get('capabilities', []),
+                'sparkplug_id': owner_id,
+                'outputs': outputs,
+            }
+            if preset.get('version'):
+                normalized['version'] = preset['version']
+            if preset.get('acquire_kind'):
+                normalized['acquire'] = {
+                    'kind': preset['acquire_kind'],
+                    'url': normalized['url'],
+                }
+            sources.append(normalized)
+
+        return sources
+
     def register_presets(self) -> Dict[str, Any]:
         """Return presets defined in manifest, including those from remote feeds."""
         presets = {}
@@ -39,7 +94,28 @@ class JsonPluginPresetMixin:
                     'url': preset.get('url', ''),
                     'sha256': preset.get('sha256', ''),
                     'distro': preset.get('distro', ''),
+                    'family': preset.get('family', preset.get('distro', '')),
+                    'version': preset.get('version', ''),
                     **preset.get('metadata', {})
+                }
+        source = self.manifest.get('source')
+        if isinstance(source, dict):
+            source_id = source.get('id')
+            if source_id:
+                presets[source_id] = {
+                    'name': source.get('name', ''),
+                    'url': source.get('url', ''),
+                    'sha256': source.get('sha256', ''),
+                    'distro': source.get('family', source.get('distro', '')),
+                    'family': source.get('family', source.get('distro', '')),
+                    'version': source.get('version', ''),
+                    'installer_scheme': source.get('installer_scheme', ''),
+                    'capabilities': source.get('capabilities', []),
+                    'source_id': source_id,
+                    'source_name': source.get('name', ''),
+                    'source_family': source.get('family', source.get('distro', '')),
+                    'source_url': source.get('url', ''),
+                    **source.get('metadata', {}),
                 }
         return presets
 

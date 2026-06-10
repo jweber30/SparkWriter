@@ -14,14 +14,17 @@ If this document and the runtime disagree, trust the code, schema, and tests:
 
 ## What A Manifest Does
 
-A SparkWriter manifest defines a customization layer that can:
+A SparkWriter manifest defines an installable workflow that can:
 
+- declare its installation Source/media flavor
 - expose configuration fields in the UI
 - arrange those fields into wizard pages
 - render templates with the collected values
 - run actions during ISO processing or after USB write
 
-Manifests are selected after the user chooses an installation Source.
+Installed manifests are SparkWriter's Source catalog. When a manifest declares
+`source`, SparkWriter shows that manifest-owned Source and opens the matching
+flavor-specific form.
 
 ## Minimal Manifest
 
@@ -68,9 +71,35 @@ SparkWriter currently supports two install paths:
 
 URL installs are snapshot installs. Reinstall to pick up remote changes.
 
-## Presets And Remote Feeds
+## Source And Outputs
 
-Manifests may still define install media through:
+New manifests should define one top-level `source`. This keeps flavor-specific
+media data beside the form, templates, and actions that know how to use it.
+
+```json
+{
+  "source": {
+    "id": "ubuntu-24.04-server-autoinstall",
+    "name": "Ubuntu 24.04 LTS Server Autoinstall",
+    "family": "ubuntu",
+    "version": "24.04",
+    "url": "https://example.com/ubuntu.iso",
+    "installer_scheme": "ubuntu-nocloud",
+    "capabilities": ["cloud-init-nocloud"]
+  },
+  "outputs": {
+    "usb": true,
+    "iso": true
+  }
+}
+```
+
+`outputs.usb` controls whether the workflow can be written to a USB device.
+`outputs.iso` controls whether SparkWriter offers Save ISO for the workflow.
+
+## Legacy Presets And Remote Feeds
+
+Manifests may still define install media through legacy fields:
 
 - `presets`
 - `preset_feeds`
@@ -263,8 +292,7 @@ Currently supported action types:
 - `store_ephemeral_secret`
 - `show_ephemeral_secret_button`
 - `create_artifact`
-- `prepare_proxmox_auto_install_iso`
-- `prepare_ubuntu_nocloud_iso`
+- `prepare_installer_iso`
 
 Notes:
 
@@ -273,6 +301,7 @@ Notes:
 - `when` conditions can skip an action
 - `output_var` stores an action result for later actions in the same phase
 - plugin-specific external commands must be declared in `requires.commands`
+- `prepare_installer_iso` uses `installer_scheme` plus generic `artifact_map` and `options`; scheme handlers interpret role names such as `user-data`, `meta-data`, `answer-file`, or `first-boot`
 
 For exact per-action fields, use the schema and runtime as the source of truth.
 

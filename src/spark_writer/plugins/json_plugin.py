@@ -55,12 +55,13 @@ class JsonSparkPlug(
         'store_ephemeral_secret',
         'show_ephemeral_secret_button',
         'create_artifact',
+        'prepare_installer_iso',
         'prepare_proxmox_auto_install_iso',
         'prepare_ubuntu_nocloud_iso',
     }
     _RETIRED_ACTION_TYPES = {
         'write_file': "write_file is retired; use create_artifact plus a host-owned primitive instead.",
-        'modify_iso': "modify_iso is retired; use a scheme-specific host primitive such as prepare_ubuntu_nocloud_iso.",
+        'modify_iso': "modify_iso is retired; use create_artifact plus prepare_installer_iso.",
     }
     _PROXMOX_WRAPPER_COMMAND = 'proxmox-auto-install-assistant'
 
@@ -279,6 +280,18 @@ class JsonSparkPlug(
         actions = self.manifest.get('actions', {})
         return bool(actions.get('on_iso_ready'))
 
+    def supports_save_iso(self) -> bool:
+        outputs = self.manifest.get('outputs', {})
+        if not isinstance(outputs, dict):
+            return True
+        return bool(outputs.get('iso', True))
+
+    def supports_usb_write(self) -> bool:
+        outputs = self.manifest.get('outputs', {})
+        if not isinstance(outputs, dict):
+            return True
+        return bool(outputs.get('usb', True))
+
     def get_config_fields(self) -> List[Dict[str, Any]]:
         """Return config fields from manifest."""
         return self.manifest.get('config_fields', [])
@@ -382,6 +395,13 @@ class JsonSparkPlug(
         self, action: Dict[str, Any], context: Dict[str, Any]
     ) -> Optional[str]:
         return installer_schemes.prepare_proxmox_auto_install_iso(
+            self._exec_ctx, action, context, self._build_runtime_approval_error
+        )
+
+    def _handle_prepare_installer_iso(
+        self, action: Dict[str, Any], context: Dict[str, Any]
+    ) -> Optional[str]:
+        return installer_schemes.prepare_installer_iso(
             self._exec_ctx, action, context, self._build_runtime_approval_error
         )
 
@@ -742,6 +762,7 @@ class JsonSparkPlug(
             'store_ephemeral_secret':      self._handle_store_ephemeral_secret,
             'show_ephemeral_secret_button': self._handle_show_ephemeral_secret_button,
             'create_artifact':            self._handle_create_artifact,
+            'prepare_installer_iso':       self._handle_prepare_installer_iso,
             'prepare_proxmox_auto_install_iso': self._handle_prepare_proxmox_auto_install_iso,
             'prepare_ubuntu_nocloud_iso': self._handle_prepare_ubuntu_nocloud_iso,
         }
@@ -897,6 +918,7 @@ class JsonSparkPlug(
 
     def get_declared_host_action_types(self) -> List[str]:
         host_owned = {
+            "prepare_installer_iso",
             "prepare_ubuntu_nocloud_iso",
             "prepare_proxmox_auto_install_iso",
         }

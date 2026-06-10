@@ -16,7 +16,7 @@ If a README statement conflicts with code/tests, prefer code/tests and open a do
 
 SparkWriter is a **modular USB provisioning tool** for bare-metal infrastructure. It:
 
-1. Loads JSON SparkWriter manifests that define presets (ISOs) and automation workflows
+1. Loads installed JSON SparkWriter manifests as the Source catalog
 2. Generates dynamic forms based on manifest `config_fields` to collect user input
 3. Renders templates using the collected data
 4. Executes lifecycle actions (before/after write)
@@ -33,7 +33,7 @@ SparkWriter is a **modular USB provisioning tool** for bare-metal infrastructure
 
 ## Manifest Overview
 
-SparkWriter manifests are JSON files that extend SparkWriter with presets, forms, and lifecycle actions.
+SparkWriter manifests are JSON files that define one installable workflow: Source/media flavor, form, templates, outputs, and lifecycle actions.
 
 External authors should use `docs/SPARKWRITER_MANIFEST_AUTHORING.md` for the current manifest and runtime contract.
 
@@ -43,7 +43,7 @@ External authors should use `docs/SPARKWRITER_MANIFEST_AUTHORING.md` for the cur
     - `version: "1.0"`
     - `metadata.id`, `metadata.name`
     - `requires.commands` (empty array if none)
-2. Add at least one preset in `presets`.
+2. Add one top-level `source` and optional `outputs`.
 3. Host the manifest at an HTTPS URL.
 4. Install it locally to test:
 
@@ -68,7 +68,7 @@ That document covers:
 
 - manifest shape and required fields
 - trust, GitHub signing, and install-time behavior
-- presets, remote feeds, and torrent support
+- manifest-owned Sources, legacy presets, remote feeds, and torrent support
 - config fields, visibility rules, and template behavior
 - lifecycle phases, action semantics, approvals, artifacts, and retired actions
 

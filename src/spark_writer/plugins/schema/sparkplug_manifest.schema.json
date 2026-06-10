@@ -9,7 +9,7 @@
     "version": {
       "type": "string",
       "description": "Manifest schema version",
-      "const": "1.0"
+      "const": "1.3"
     },
     "metadata": {
       "type": "object",
@@ -110,6 +110,27 @@
         }
       }
     },
+    "source": {
+      "$ref": "#/definitions/source",
+      "description": "Manifest-owned installation media/flavor. New manifests should define one Source so the manifest owns the workflow boundary."
+    },
+    "outputs": {
+      "type": "object",
+      "description": "Kinds of outputs this manifest can produce.",
+      "properties": {
+        "usb": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether the workflow can write to a USB device"
+        },
+        "iso": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether the workflow can be exported as an ISO"
+        }
+      },
+      "additionalProperties": false
+    },
     "secure_manifest": false,
     "preset_feeds": {
       "type": "array",
@@ -145,7 +166,7 @@
           "id": {
             "type": "string",
             "description": "Preset identifier",
-            "pattern": "^[a-z0-9-]+$"
+            "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
           },
           "name": {
             "type": "string",
@@ -328,6 +349,75 @@
     "signature": false
   },
   "definitions": {
+    "source": {
+      "type": "object",
+      "required": ["id", "name", "url", "family"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable Source/flavor identifier",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name for the installable media/flavor"
+        },
+        "url": {
+          "type": "string",
+          "description": "ISO download URL, torrent URL, or magnet link"
+        },
+        "family": {
+          "type": "string",
+          "description": "Distribution or installer family, such as ubuntu or proxmox"
+        },
+        "version": {
+          "type": "string",
+          "description": "Flavor or upstream installer version"
+        },
+        "sha256": {
+          "type": "string",
+          "description": "Expected SHA256 checksum of the ISO",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "acquire": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["direct", "torrent", "magnet"]
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        "installer_scheme": {
+          "type": "string",
+          "description": "Host-owned installer preparation scheme"
+        },
+        "capabilities": {
+          "type": "array",
+          "description": "Source/media capabilities",
+          "items": {"type": "string"}
+        },
+        "outputs": {
+          "type": "object",
+          "description": "Optional Source-level output override",
+          "properties": {
+            "usb": {"type": "boolean"},
+            "iso": {"type": "boolean"}
+          },
+          "additionalProperties": false
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Additional Source metadata",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
     "action": {
       "type": "object",
       "required": ["id", "type"],
@@ -350,8 +440,7 @@
             "store_ephemeral_secret",
             "show_ephemeral_secret_button",
             "create_artifact",
-            "prepare_proxmox_auto_install_iso",
-            "prepare_ubuntu_nocloud_iso"
+            "prepare_installer_iso"
           ],
           "description": "Action type"
         },
@@ -410,29 +499,25 @@
           "type": "string",
           "description": "Source ISO path for host-owned ISO preparation actions"
         },
+        "installer_scheme": {
+          "type": "string",
+          "description": "Installer preparation scheme for prepare_installer_iso"
+        },
         "output_path": {
           "type": "string",
           "description": "Destination ISO path for host-owned ISO preparation actions"
         },
-        "answer_artifact": {
-          "type": "string",
-          "description": "Artifact id for the Proxmox answer file"
+        "artifact_map": {
+          "type": "object",
+          "description": "Scheme-specific artifact roles mapped to manifest artifact ids",
+          "additionalProperties": {
+            "type": "string"
+          }
         },
-        "firstboot_artifact": {
-          "type": "string",
-          "description": "Optional artifact id for the Proxmox first-boot script"
-        },
-        "user_data_artifact": {
-          "type": "string",
-          "description": "Artifact id for Ubuntu NoCloud user-data"
-        },
-        "meta_data_artifact": {
-          "type": "string",
-          "description": "Artifact id for Ubuntu NoCloud meta-data"
-        },
-        "volume_label": {
-          "type": "string",
-          "description": "Optional output ISO volume label"
+        "options": {
+          "type": "object",
+          "description": "Scheme-specific options for generic host-owned actions",
+          "additionalProperties": true
         },
         "emit_event": {
           "type": "object",

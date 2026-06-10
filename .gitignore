@@ -31,3 +31,5 @@ debian/*.prerm.debhelper
 
 *.txt
 *.json
+!src/spark_writer/plugins/installed/*.json
+!src/spark_writer/plugins/schema/*.json

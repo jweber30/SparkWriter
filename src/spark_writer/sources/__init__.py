@@ -1,4 +1,4 @@
-"""Host-owned Source catalog support."""
+"""Installation Source support."""
 
 from .catalog import Source, SourceCatalog
 

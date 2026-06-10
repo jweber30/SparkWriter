@@ -1,0 +1,343 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "id": "proxmox-tailscale",
+    "name": "Proxmox Tailscale",
+    "version": "1.0.0",
+    "author": "MetalStrapper",
+    "description": "Prepare a Proxmox VE auto-install ISO with Tailscale first-boot provisioning."
+  },
+  "requires": {
+    "commands": [
+      {
+        "name": "proxmox-auto-install-assistant",
+        "package": "proxmox-auto-install-assistant",
+        "description": "Prepare Proxmox VE installer ISOs with an answer file and first-boot script",
+        "install_hint": "Install proxmox-auto-install-assistant from Proxmox VE tooling",
+        "allow_plugin_specific": true
+      }
+    ]
+  },
+  "source": {
+    "id": "proxmox-ve-9.1-tailscale",
+    "name": "Proxmox VE 9.1 Tailscale",
+    "family": "proxmox",
+    "version": "9.1",
+    "url": "https://enterprise.proxmox.com/iso/proxmox-ve_9.1-1.iso",
+    "installer_scheme": "proxmox-auto-install"
+  },
+  "outputs": {
+    "usb": true,
+    "iso": true
+  },
+  "ui_visibility": {
+    "when": {
+      "source_family": ["proxmox"],
+      "installer_scheme": ["proxmox-auto-install"]
+    }
+  },
+  "presets": [
+    {
+      "id": "proxmox-ve-9.1",
+      "name": "Proxmox VE 9.1",
+      "url": "https://enterprise.proxmox.com/iso/proxmox-ve_9.1-1.iso",
+      "distro": "proxmox",
+      "metadata": {
+        "installer_scheme": "proxmox-auto-install"
+      }
+    }
+  ],
+  "config_fields": [
+    {
+      "id": "contact-email",
+      "label": "Contact Email",
+      "type": "text",
+      "placeholder": "admin@example.org",
+      "description": "Email address used by the Proxmox installer",
+      "required": true,
+      "standard_field": "user.email",
+      "storage": {
+        "scope": "profile",
+        "persist": true
+      }
+    },
+    {
+      "id": "fqdn",
+      "label": "Fully Qualified Domain Name",
+      "type": "text",
+      "placeholder": "proxmox.example.org",
+      "description": "Fully qualified domain name for the Proxmox host",
+      "required": true,
+      "standard_field": "network.hostname",
+      "storage": {
+        "scope": "profile",
+        "persist": true
+      }
+    },
+    {
+      "id": "hostname",
+      "label": "Tailscale Hostname",
+      "type": "text",
+      "placeholder": "pve-main",
+      "description": "Optional Tailscale device name; defaults to pve-<hostname>"
+    },
+    {
+      "id": "root-password",
+      "label": "Root Password",
+      "type": "password",
+      "description": "Optional root password; a temporary password is generated when left blank"
+    },
+    {
+      "id": "keyboard",
+      "label": "Keyboard Layout",
+      "type": "select",
+      "default": "en-us",
+      "description": "Keyboard layout for the installed system",
+      "standard_field": "locale.keyboard",
+      "storage": {
+        "scope": "profile",
+        "persist": true
+      },
+      "options": [
+        {"value": "en-us", "label": "English (US)"},
+        {"value": "en-gb", "label": "English (UK)"},
+        {"value": "de", "label": "German"},
+        {"value": "fr", "label": "French"}
+      ]
+    },
+    {
+      "id": "country",
+      "label": "Country",
+      "type": "text",
+      "default": "us",
+      "description": "Two-letter country code for the installer"
+    },
+    {
+      "id": "timezone",
+      "label": "Timezone",
+      "type": "text",
+      "default": "America/Denver",
+      "description": "System timezone",
+      "standard_field": "locale.timezone",
+      "storage": {
+        "scope": "profile",
+        "persist": true
+      }
+    },
+    {
+      "id": "disk",
+      "label": "Install Disk",
+      "type": "text",
+      "default": "/dev/sda",
+      "description": "Target disk for Proxmox auto-install"
+    },
+    {
+      "id": "filesystem",
+      "label": "Filesystem",
+      "type": "select",
+      "default": "ext4",
+      "description": "Root filesystem for the Proxmox installation",
+      "options": [
+        {"value": "ext4", "label": "ext4"},
+        {"value": "xfs", "label": "XFS"},
+        {"value": "zfs", "label": "ZFS"}
+      ]
+    },
+    {
+      "id": "ssh-keys",
+      "label": "SSH Public Keys",
+      "type": "multiline",
+      "description": "Optional SSH public keys for the installed host",
+      "standard_field": "user.ssh_public_keys",
+      "storage": {
+        "scope": "profile",
+        "persist": true
+      },
+      "big": true
+    },
+    {
+      "id": "authkey",
+      "label": "Tailscale Auth Key",
+      "type": "password",
+      "description": "Ephemeral Tailscale auth key used during first boot",
+      "required": true
+    },
+    {
+      "id": "tailscale-domain",
+      "label": "Tailscale Domain",
+      "type": "text",
+      "placeholder": "tailnet.ts.net",
+      "description": "Optional tailnet domain for certificate provisioning"
+    },
+    {
+      "id": "apt-proxy",
+      "label": "APT Proxy",
+      "type": "text",
+      "placeholder": "http://apt-cache.example.org:3142",
+      "description": "Optional APT cache or proxy URL used on first boot"
+    }
+  ],
+  "wizard": {
+    "pages": [
+      {
+        "id": "identity",
+        "title": "Identity",
+        "description": "Host identity and installer contact settings.",
+        "fields": ["contact-email", "fqdn", "hostname", "root-password"]
+      },
+      {
+        "id": "install",
+        "title": "Install",
+        "description": "Locale and disk settings for the Proxmox installer.",
+        "fields": ["keyboard", "country", "timezone", "disk", "filesystem", "ssh-keys"]
+      },
+      {
+        "id": "tailscale",
+        "title": "Tailscale",
+        "description": "Tailscale first-boot provisioning settings.",
+        "fields": ["authkey", "tailscale-domain", "apt-proxy"]
+      }
+    ]
+  },
+  "assets": {
+    "firstboot-script": {
+      "path": "proxmox-tailscale.firstboot.sh",
+      "media_type": "text/x-shellscript",
+      "permissions": "0755"
+    }
+  },
+  "templates": {
+    "answer_toml": [
+      "[global]",
+      "keyboard = \"{{keyboard}}\"",
+      "country = \"{{country}}\"",
+      "fqdn = \"{{fqdn}}\"",
+      "mailto = \"{{contact-email}}\"",
+      "timezone = \"{{timezone}}\"",
+      "root_password = \"{{effective_root_password}}\"",
+      "",
+      "[network]",
+      "source = \"from-dhcp\"",
+      "",
+      "[disk-setup]",
+      "filesystem = \"{{filesystem}}\"",
+      "disk_list = [\"{{disk}}\"]"
+    ],
+    "firstboot_script": {
+      "asset": "firstboot-script"
+    }
+  },
+  "actions": {
+    "on_iso_ready": [
+      {
+        "id": "generate_root_password",
+        "type": "generate_ephemeral_password",
+        "length": 20,
+        "output_var": "_generated_root_password_plaintext",
+        "when": {
+          "field": "root-password",
+          "operator": "empty"
+        },
+        "emit_event": {
+          "message": "Generating temporary Proxmox root password",
+          "progress": 10
+        }
+      },
+      {
+        "id": "store_generated_root_password",
+        "type": "store_ephemeral_secret",
+        "key": "root-password",
+        "value": "{{_generated_root_password_plaintext}}",
+        "when": {
+          "field": "root-password",
+          "operator": "empty"
+        },
+        "emit_event": {
+          "message": "Storing temporary root password in memory",
+          "progress": 15
+        }
+      },
+      {
+        "id": "render_answer_toml",
+        "type": "render_template",
+        "template": "answer_toml",
+        "output_var": "answer_toml_content",
+        "emit_event": {
+          "message": "Rendering Proxmox answer file",
+          "progress": 25
+        }
+      },
+      {
+        "id": "create_answer_artifact",
+        "type": "create_artifact",
+        "artifact_id": "answer_toml",
+        "content_var": "answer_toml_content",
+        "kind": "config",
+        "logical_name": "answer.toml",
+        "media_type": "application/toml",
+        "emit_event": {
+          "message": "Registering Proxmox answer file",
+          "progress": 35
+        }
+      },
+      {
+        "id": "render_firstboot_script",
+        "type": "render_template",
+        "template": "firstboot_script",
+        "output_var": "firstboot_script_content",
+        "emit_event": {
+          "message": "Rendering Tailscale first-boot script",
+          "progress": 50
+        }
+      },
+      {
+        "id": "create_firstboot_artifact",
+        "type": "create_artifact",
+        "artifact_id": "firstboot_script",
+        "content_var": "firstboot_script_content",
+        "kind": "script",
+        "logical_name": "firstboot.sh",
+        "media_type": "text/x-shellscript",
+        "executable": true,
+        "emit_event": {
+          "message": "Registering Tailscale first-boot script",
+          "progress": 60
+        }
+      },
+      {
+        "id": "inject_into_iso",
+        "type": "prepare_installer_iso",
+        "installer_scheme": "proxmox-auto-install",
+        "iso_path": "{{iso_path}}",
+        "output_path": "{{iso_path}}",
+        "artifact_map": {
+          "answer-file": "answer_toml",
+          "first-boot": "firstboot_script"
+        },
+        "sudo": true,
+        "emit_event": {
+          "message": "Preparing Proxmox auto-install ISO",
+          "progress": 90
+        }
+      }
+    ],
+    "on_write_complete": [
+      {
+        "id": "show_generated_root_password",
+        "type": "show_ephemeral_secret_button",
+        "key": "root-password",
+        "button_label": "Reveal Root Password",
+        "message_template": "Temporary root password for {{fqdn}}: {{root-password}}",
+        "auto_destroy": true,
+        "when": {
+          "field": "root-password",
+          "operator": "empty"
+        },
+        "emit_event": {
+          "message": "USB write complete. Reveal the generated root password before rebooting.",
+          "progress": 100
+        }
+      }
+    ]
+  }
+}

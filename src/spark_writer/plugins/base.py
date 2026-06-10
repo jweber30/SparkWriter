@@ -101,6 +101,11 @@ class SparkPlug(ABC):
         """
         return True
 
+    def supports_usb_write(self) -> bool:
+        """Return True if this plugin's workflow can write to a USB device."""
+
+        return True
+
     # ------------------------------------------------------------------
     # Core identification & configuration
     # ------------------------------------------------------------------
@@ -123,6 +128,11 @@ class SparkPlug(ABC):
         Format: {'id': {'name': 'Display Name', 'url': 'magnet/http url', ...}}
         """
         return {}
+
+    def register_sources(self) -> List[Dict[str, Any]]:
+        """Return manifest-owned installation Sources exposed by this plugin."""
+
+        return []
 
     def get_config_fields(self) -> List[Union[ConfigField, Dict[str, Any]]]:
         """

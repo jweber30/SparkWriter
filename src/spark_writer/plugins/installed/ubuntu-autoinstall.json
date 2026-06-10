@@ -18,6 +18,19 @@
       }
     ]
   },
+  "source": {
+    "id": "ubuntu-24.04-server-autoinstall",
+    "name": "Ubuntu 24.04 LTS Server Autoinstall",
+    "family": "ubuntu",
+    "version": "24.04",
+    "url": "https://releases.ubuntu.com/24.04/ubuntu-24.04.3-live-server-amd64.iso",
+    "installer_scheme": "ubuntu-nocloud",
+    "capabilities": ["cloud-init-nocloud"]
+  },
+  "outputs": {
+    "usb": true,
+    "iso": true
+  },
   "ui_visibility": {
     "when": {
       "source_family": ["ubuntu"],
@@ -165,12 +178,17 @@
       },
       {
         "id": "inject_cloud_init",
-        "type": "prepare_ubuntu_nocloud_iso",
+        "type": "prepare_installer_iso",
+        "installer_scheme": "ubuntu-nocloud",
         "iso_path": "{{iso_path}}",
-        "user_data_artifact": "user_data",
-        "meta_data_artifact": "meta_data",
         "output_path": "{{iso_path}}",
-        "volume_label": "Ubuntu_Auto",
+        "artifact_map": {
+          "user-data": "user_data",
+          "meta-data": "meta_data"
+        },
+        "options": {
+          "volume_label": "Ubuntu_Auto"
+        },
         "emit_event": {
           "message": "Injecting cloud-init configuration into ISO",
           "progress": 80

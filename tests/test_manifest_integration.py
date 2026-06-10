@@ -118,7 +118,8 @@ class TestProxmoxManifestIntegration:
         wrapper_action = next(
             a
             for a in proxmox_plugin.manifest.get("actions", {}).get("on_iso_ready", [])
-            if a.get("type") == "prepare_proxmox_auto_install_iso"
+            if a.get("type") == "prepare_installer_iso"
+            and a.get("installer_scheme") == "proxmox-auto-install"
         )
 
         with pytest.raises(RuntimeError) as exc_info:
@@ -204,11 +205,14 @@ class TestProxmoxManifestIntegration:
         result = proxmox_plugin._execute_action(
             action={
                 "id": "inject_into_iso",
-                "type": "prepare_proxmox_auto_install_iso",
+                "type": "prepare_installer_iso",
+                "installer_scheme": "proxmox-auto-install",
                 "iso_path": "{{iso_path}}",
-                "answer_artifact": "answer_toml",
-                "firstboot_artifact": "firstboot_script",
-                "output_path": "{{iso_path | replace('.iso', '-tailscale.iso')}}",
+                "output_path": "/tmp/input-tailscale.iso",
+                "artifact_map": {
+                    "answer-file": "answer_toml",
+                    "first-boot": "firstboot_script",
+                },
                 "sudo": True,
             },
             ui_values={},
@@ -240,11 +244,14 @@ class TestProxmoxManifestIntegration:
                 },
                 {
                     "id": "missing_artifact",
-                    "type": "prepare_ubuntu_nocloud_iso",
+                    "type": "prepare_installer_iso",
+                    "installer_scheme": "ubuntu-nocloud",
                     "iso_path": "{{iso_path}}",
-                    "user_data_artifact": "missing",
-                    "meta_data_artifact": "missing",
                     "output_path": "{{iso_path}}",
+                    "artifact_map": {
+                        "user-data": "missing",
+                        "meta-data": "missing",
+                    },
                 },
             ]
         }
@@ -385,8 +392,62 @@ class TestUbuntuAutoinstallManifestIntegration:
     def test_manifest_uses_host_owned_nocloud_wrapper(self, ubuntu_autoinstall_manifest):
         actions = ubuntu_autoinstall_manifest["actions"]["on_iso_ready"]
         assert any(action["type"] == "create_artifact" for action in actions)
-        assert any(action["type"] == "prepare_ubuntu_nocloud_iso" for action in actions)
+        assert any(
+            action["type"] == "prepare_installer_iso"
+            and action["installer_scheme"] == "ubuntu-nocloud"
+            for action in actions
+        )
         assert all(action["type"] != "modify_iso" for action in actions)
+        assert all(action["type"] != "prepare_ubuntu_nocloud_iso" for action in actions)
+
+    def test_builtin_manifest_installer_actions_conform_to_schema(
+        self,
+        ubuntu_autoinstall_manifest,
+        proxmox_manifest,
+    ):
+        import json
+
+        schema_path = (
+            SRC_ROOT
+            / "spark_writer"
+            / "plugins"
+            / "schema"
+            / "sparkplug_manifest.schema.json"
+        )
+        with schema_path.open("r", encoding="utf-8") as handle:
+            schema = json.load(handle)
+
+        allowed_action_types = set(
+            schema["definitions"]["action"]["properties"]["type"]["enum"]
+        )
+        action_properties = set(schema["definitions"]["action"]["properties"])
+        retired_scheme_fields = {
+            "answer_artifact",
+            "firstboot_artifact",
+            "user_data_artifact",
+            "meta_data_artifact",
+            "volume_label",
+        }
+        manifests = [ubuntu_autoinstall_manifest, proxmox_manifest]
+        manifest_actions = [
+            action
+            for manifest in manifests
+            for phase_actions in manifest.get("actions", {}).values()
+            for action in phase_actions
+        ]
+        manifest_action_types = {action["type"] for action in manifest_actions}
+        manifest_action_fields = {
+            field for action in manifest_actions for field in action
+        }
+
+        assert manifest_action_types <= allowed_action_types
+        assert retired_scheme_fields.isdisjoint(action_properties)
+        assert retired_scheme_fields.isdisjoint(manifest_action_fields)
+        assert not any(
+            action_type.startswith("prepare_ubuntu_")
+            or action_type.startswith("prepare_proxmox_")
+            for action_type in allowed_action_types
+        )
 
     @patch("spark_writer.plugins.installer_schemes.inject_cloud_init_nocloud")
     def test_ubuntu_wrapper_uses_artifacts(self, mock_inject, ubuntu_autoinstall_plugin):
@@ -422,12 +483,17 @@ class TestUbuntuAutoinstallManifestIntegration:
         result = ubuntu_autoinstall_plugin._execute_action(
             action={
                 "id": "inject_cloud_init",
-                "type": "prepare_ubuntu_nocloud_iso",
+                "type": "prepare_installer_iso",
+                "installer_scheme": "ubuntu-nocloud",
                 "iso_path": "{{iso_path}}",
-                "user_data_artifact": "user_data",
-                "meta_data_artifact": "meta_data",
                 "output_path": "{{iso_path}}",
-                "volume_label": "Ubuntu_Auto",
+                "artifact_map": {
+                    "user-data": "user_data",
+                    "meta-data": "meta_data",
+                },
+                "options": {
+                    "volume_label": "Ubuntu_Auto",
+                },
             },
             ui_values={},
             preset={"id": "ubuntu-24.04-server", "name": "Ubuntu 24.04"},
@@ -566,4 +632,3 @@ class TestArtifactValidation:
         plugin = JsonSparkPlug(str(manifest))
         assert plugin.is_available is False
         assert "write_file is retired" in (plugin.unavailable_reason or "")
-

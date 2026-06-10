@@ -1,4 +1,9 @@
-"""Host-owned installer Source catalog."""
+"""Installation Source normalization.
+
+The active SparkWriter catalog is the installed manifest set. This module keeps
+the small runtime Source value object and a legacy JSON catalog loader used by
+older tests/tools.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +26,9 @@ class Source:
     acquire_kind: Optional[str] = None
     installer_scheme: Optional[str] = None
     capabilities: List[str] = field(default_factory=list)
+    sparkplug_id: Optional[str] = None
+    can_write_usb: bool = True
+    can_export_iso: bool = True
 
     @classmethod
     def from_dict(cls, raw: Dict[str, Any]) -> "Source":
@@ -34,6 +42,13 @@ class Source:
         acquire = raw.get("acquire", {})
         acquire_kind = str(acquire.get("kind", "")).strip() or None
         installer_scheme = str(raw.get("installer_scheme", "")).strip() or None
+        sparkplug_id = str(raw.get("sparkplug_id", "")).strip() or None
+
+        outputs = raw.get("outputs", {})
+        if not isinstance(outputs, dict):
+            outputs = {}
+        can_write_usb = bool(outputs.get("usb", raw.get("can_write_usb", True)))
+        can_export_iso = bool(outputs.get("iso", raw.get("can_export_iso", True)))
 
         capabilities_raw = raw.get("capabilities", [])
         capabilities = [str(item).strip() for item in capabilities_raw if str(item).strip()]
@@ -57,6 +72,9 @@ class Source:
             acquire_kind=acquire_kind,
             installer_scheme=installer_scheme,
             capabilities=capabilities,
+            sparkplug_id=sparkplug_id,
+            can_write_usb=can_write_usb,
+            can_export_iso=can_export_iso,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -75,7 +93,11 @@ class Source:
             "source_url": self.url,
             "capabilities": list(self.capabilities),
             "source_capabilities": list(self.capabilities),
+            "can_write_usb": self.can_write_usb,
+            "can_export_iso": self.can_export_iso,
         }
+        if self.sparkplug_id:
+            payload["sparkplug_id"] = self.sparkplug_id
         if self.version:
             payload["version"] = self.version
             payload["source_version"] = self.version
@@ -94,6 +116,9 @@ class SourceCatalog:
         self._catalog_path = catalog_path or Path(__file__).with_name("catalog.json")
 
     def list_sources(self) -> List[Source]:
+        if not self._catalog_path.exists():
+            return []
+
         with self._catalog_path.open("r", encoding="utf-8") as handle:
             payload = json.load(handle)
 

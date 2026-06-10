@@ -1,4 +1,4 @@
-"""Tests for host-owned Source catalogs and Source-aware SparkPlug selection."""
+"""Tests for manifest-owned Sources and Source-aware SparkPlug selection."""
 
 import json
 import sys
@@ -15,14 +15,9 @@ from spark_writer.receipts import build_receipt_payload
 from spark_writer.sources import Source, SourceCatalog
 
 
-def test_source_catalog_loads_builtin_json():
+def test_source_catalog_without_json_is_empty():
     catalog = SourceCatalog()
-    sources = catalog.list_sources()
-
-    assert sources
-    assert any(source.id == "ubuntu-24.04-server" for source in sources)
-    assert all(source.url for source in sources)
-    assert all(source.family for source in sources)
+    assert catalog.list_sources() == []
 
 
 def test_source_catalog_normalizes_catalog_shape(tmp_path):
@@ -51,6 +46,34 @@ def test_source_catalog_normalizes_catalog_shape(tmp_path):
     assert source.acquire_kind == "direct"
     assert source.installer_scheme == "ubuntu-nocloud"
     assert source.to_dict()["source_family"] == "ubuntu"
+    assert source.can_write_usb is True
+    assert source.can_export_iso is True
+
+
+def test_plugin_manager_collects_manifest_owned_sources(tmp_path):
+    manifest = {
+        "version": "1.0",
+        "metadata": {"id": "ubuntu-autoinstall", "name": "Ubuntu Autoinstall"},
+        "requires": {"commands": []},
+        "source": {
+            "id": "ubuntu-24.04-server-autoinstall",
+            "name": "Ubuntu 24.04 LTS Server Autoinstall",
+            "family": "ubuntu",
+            "url": "https://example.com/ubuntu.iso",
+            "installer_scheme": "ubuntu-nocloud",
+        },
+        "outputs": {"usb": True, "iso": False},
+    }
+
+    manager = PluginManager()
+    manager.plugins = [_write_plugin(tmp_path, "ubuntu-autoinstall", manifest)]
+
+    source = manager.get_manifest_sources()[0]
+
+    assert source.id == "ubuntu-24.04-server-autoinstall"
+    assert source.sparkplug_id == "ubuntu-autoinstall"
+    assert source.can_write_usb is True
+    assert source.can_export_iso is False
 
 
 def _write_plugin(tmp_path: Path, plugin_id: str, manifest: dict) -> JsonSparkPlug:
@@ -88,6 +111,37 @@ def test_plugin_manager_filters_plugins_by_source_compatibility(tmp_path):
     compatible = manager.get_compatible_plugins(ubuntu_source)
 
     assert [plugin.plugin_id for plugin in compatible] == ["ubuntu-only"]
+
+
+def test_plugin_manager_uses_manifest_source_owner(tmp_path):
+    owner_manifest = {
+        "version": "1.0",
+        "metadata": {"id": "owner", "name": "Owner"},
+        "requires": {"commands": []},
+        "source": {
+            "id": "owner-source",
+            "name": "Owner Source",
+            "family": "ubuntu",
+            "url": "https://example.com/owner.iso",
+        },
+    }
+    broad_manifest = {
+        "version": "1.0",
+        "metadata": {"id": "broad", "name": "Broad"},
+        "requires": {"commands": []},
+        "ui_visibility": {"when": {"source_family": ["ubuntu"]}},
+    }
+
+    manager = PluginManager()
+    manager.plugins = [
+        _write_plugin(tmp_path, "owner", owner_manifest),
+        _write_plugin(tmp_path, "broad", broad_manifest),
+    ]
+
+    source = manager.get_manifest_sources()[0]
+    compatible = manager.get_compatible_plugins(source.to_dict())
+
+    assert [plugin.plugin_id for plugin in compatible] == ["owner"]
 
 
 def test_plugin_manager_detects_conflicting_selection(tmp_path):

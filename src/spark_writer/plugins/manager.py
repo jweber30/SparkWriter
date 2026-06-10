@@ -5,11 +5,13 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from .base import EventEmitter, SparkPlug
 from .json_plugin import JsonSparkPlug
+from ..sources import Source
 
 logger = logging.getLogger(__name__)
 
 class PluginManager:
     _CONFLICTING_HOST_ACTION_TYPES = {
+        "prepare_installer_iso",
         "prepare_ubuntu_nocloud_iso",
         "prepare_proxmox_auto_install_iso",
     }
@@ -110,6 +112,20 @@ class PluginManager:
                 presets.update(plugin.register_presets())
         return presets
 
+    def get_manifest_sources(self) -> List[Source]:
+        sources: List[Source] = []
+        for plugin in self.iter_enabled_plugins():
+            for raw_source in plugin.register_sources():
+                try:
+                    sources.append(Source.from_dict(raw_source))
+                except Exception as exc:
+                    logger.warning(
+                        "Skipping invalid Source from %s: %s",
+                        getattr(plugin, "name", "plugin"),
+                        exc,
+                    )
+        return sorted(sources, key=lambda source: (source.name.lower(), source.id))
+
     def notify_download_start(self, preset):
         for plugin in self.plugins:
             if self.is_plugin_enabled(plugin):
@@ -143,6 +159,15 @@ class PluginManager:
         return sorted(plugins, key=lambda plugin: (plugin.plugin_id, plugin.name))
 
     def get_compatible_plugins(self, source: Dict[str, Any]) -> List[SparkPlug]:
+        owner_id = str(source.get("sparkplug_id", "")).strip()
+        if owner_id:
+            compatible = [
+                plugin
+                for plugin in self.iter_enabled_plugins()
+                if str(plugin.plugin_id) == owner_id
+            ]
+            return self.sort_plugins(compatible)
+
         compatible = [
             plugin for plugin in self.iter_enabled_plugins() if plugin.is_compatible_with_source(source)
         ]
