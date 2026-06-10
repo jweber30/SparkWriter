@@ -1,58 +1,68 @@
 """JSON-based SparkPlug runtime implementation."""
 
-import hashlib
 import importlib.metadata
 import json
 import logging
-import os
-from dataclasses import dataclass
 import secrets
 import shutil
 import string
-import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 from usb_writer_core import receipts as receipt_utils
 from usb_writer_core import writer as usb_writer
 
-from .base import ConfigField, ConfigOption, PluginEventType, SparkPlug
-from .manifest_assets import normalize_sidecar_ref, resolve_asset_path
+from .action_context import (
+    ActionContext,
+    ManifestArtifact,
+    RuntimeApprovalRequiredError,
+)
+from .base import PluginEventType, SparkPlug
+from .json_plugin_approvals import APPROVAL_MODEL_VERSION, JsonPluginApprovalMixin
+from .json_plugin_presets import JsonPluginPresetMixin
+from .json_plugin_templates import JsonPluginTemplateMixin
 from .template_engine import SparkTemplateEngine
+from . import installer_schemes
 
 logger = logging.getLogger(__name__)
 
-APPROVAL_MODEL_VERSION = "invocation-v2"
+__all__ = ["APPROVAL_MODEL_VERSION", "JsonSparkPlug", "RuntimeApprovalRequiredError"]
 
 
-@dataclass(frozen=True)
-class PendingPhaseApproval:
-    phase_name: str
-    commands: list[str]
-
-
-class RuntimeApprovalRequiredError(RuntimeError):
-    """Raised when a phase requires runtime command approval before execution."""
-
-    def __init__(self, plugin_id: str, pending: PendingPhaseApproval):
-        self.plugin_id = plugin_id
-        self.pending = pending
-        command_list = ", ".join(pending.commands)
-        super().__init__(
-            "Runtime approval required before executing plugin commands. "
-            f"Phase '{pending.phase_name}' needs approval for: {command_list}. "
-            "Approve these commands in the runtime approval prompt to continue."
-        )
-
-
-class JsonSparkPlug(SparkPlug):
+class JsonSparkPlug(
+    JsonPluginApprovalMixin,
+    JsonPluginPresetMixin,
+    JsonPluginTemplateMixin,
+    SparkPlug,
+):
     """SparkPlug implementation that executes JSON manifests.
     
     This class provides a secure runtime for declarative plugin manifests,
     supporting template rendering, command execution, and lifecycle hooks
     without importing arbitrary Python code.
     """
+
+    _SUPPORTED_ACTION_TYPES = {
+        'render_template',
+        'run_command',
+        'compute_file_hash',
+        'create_partition',
+        'write_partition_files',
+        'generate_receipt',
+        'format_yaml_list',
+        'generate_ephemeral_password',
+        'store_ephemeral_secret',
+        'show_ephemeral_secret_button',
+        'create_artifact',
+        'prepare_proxmox_auto_install_iso',
+        'prepare_ubuntu_nocloud_iso',
+    }
+    _RETIRED_ACTION_TYPES = {
+        'write_file': "write_file is retired; use create_artifact plus a host-owned primitive instead.",
+        'modify_iso': "modify_iso is retired; use a scheme-specific host primitive such as prepare_ubuntu_nocloud_iso.",
+    }
+    _PROXMOX_WRAPPER_COMMAND = 'proxmox-auto-install-assistant'
 
     def __init__(self, manifest_path: str):
         """Initialize from a JSON manifest file.
@@ -66,12 +76,18 @@ class JsonSparkPlug(SparkPlug):
         self.template_engine = SparkTemplateEngine()
         self._available = True
         self._unavailable_reason: Optional[str] = None
-        self._action_vars: Dict[str, Any] = {}  # Variables from action outputs
         self._plugin_allowed_commands: set = set()  # Plugin-specific commands user approved
         self._ephemeral_secrets: Dict[str, str] = {}  # In-memory secrets (cleared on app exit)
+        self._active_phase_name: Optional[str] = None
         self._spark_writer_version = self._detect_spark_writer_version()
-        
+        self._exec_ctx = ActionContext(
+            template_engine=self.template_engine,
+            allowed_commands=self._plugin_allowed_commands,
+            plugin_id='',  # updated after manifest load
+        )
+
         self._load_and_validate()
+        self._exec_ctx.plugin_id = self._plugin_id()
         self._load_approved_commands()
 
     def _load_and_validate(self) -> None:
@@ -119,137 +135,85 @@ class JsonSparkPlug(SparkPlug):
                 self._unavailable_reason = f"Invalid template syntax: {template_name}"
                 return
 
-        # Check for required external commands
-        self._evaluate_availability()
-    
-    def _load_approved_commands(self) -> None:
-        """Load user-approved commands from invocation-time approval metadata."""
-        plugin_id = self._plugin_id()
-        if not plugin_id:
+        action_error = self._validate_manifest_actions()
+        if action_error:
+            self._available = False
+            self._unavailable_reason = action_error
             return
 
-        candidates = [self._approval_file_path(), self._legacy_approval_file_path()]
-        loaded_any = False
-        for approval_file in candidates:
-            if not approval_file or not os.path.exists(approval_file):
-                continue
+        wizard_error = self._validate_manifest_wizard()
+        if wizard_error:
+            self._available = False
+            self._unavailable_reason = wizard_error
+            return
 
-            try:
-                with open(approval_file, 'r', encoding='utf-8') as f:
-                    approval_data = json.load(f)
+        # Check for required external commands
+        self._evaluate_availability()
 
-                approval_model = approval_data.get('approval_model')
-                if approval_model != APPROVAL_MODEL_VERSION:
-                    logger.info(
-                        f"Ignoring legacy approval file for {plugin_id}; "
-                        f"expected model {APPROVAL_MODEL_VERSION}"
-                    )
-                    continue
+    def _validate_manifest_actions(self) -> Optional[str]:
+        """Return an availability error string for unsupported manifest actions."""
 
-                approved = approval_data.get('approved_commands', [])
-                self._plugin_allowed_commands.update(approved)
-                loaded_any = True
+        for phase_name, actions in self.manifest.get('actions', {}).items():
+            if not isinstance(actions, list):
+                return f"Manifest phase '{phase_name}' must be an array of actions"
 
-                if approved:
-                    logger.info(f"Loaded approved commands for {plugin_id}: {', '.join(approved)}")
+            for action in actions:
+                action_id = action.get('id', 'unknown')
+                action_type = action.get('type')
+                if action_type in self._RETIRED_ACTION_TYPES:
+                    return f"Action {action_id}: {self._RETIRED_ACTION_TYPES[action_type]}"
+                if action_type not in self._SUPPORTED_ACTION_TYPES:
+                    return f"Action {action_id}: unsupported action type '{action_type}'"
 
-            except (OSError, json.JSONDecodeError) as e:
-                logger.error(f"Failed to load approval file for {plugin_id}: {e}")
+        return None
 
-        if not loaded_any:
-            logger.debug(f"No approval file found for {plugin_id}")
+    def _validate_manifest_wizard(self) -> Optional[str]:
+        """Return an availability error string for invalid wizard page metadata."""
+
+        wizard = self.manifest.get("wizard", {})
+        if not wizard:
+            return None
+        if not isinstance(wizard, dict):
+            return "Manifest wizard must be an object"
+
+        pages = wizard.get("pages", [])
+        if not pages:
+            return None
+        if not isinstance(pages, list):
+            return "Manifest wizard.pages must be an array"
+
+        field_ids = {
+            str(field.get("id", "")).strip()
+            for field in self.manifest.get("config_fields", [])
+            if isinstance(field, dict) and str(field.get("id", "")).strip()
+        }
+        page_ids: set[str] = set()
+        seen_fields: set[str] = set()
+        for idx, page in enumerate(pages, start=1):
+            if not isinstance(page, dict):
+                return f"Manifest wizard page {idx} must be an object"
+            page_id = str(page.get("id", "")).strip()
+            if not page_id:
+                return f"Manifest wizard page {idx} requires id"
+            if page_id in page_ids:
+                return f"Manifest wizard page '{page_id}' is duplicated"
+            page_ids.add(page_id)
+
+            fields = page.get("fields", [])
+            if not isinstance(fields, list):
+                return f"Manifest wizard page '{page_id}' fields must be an array"
+            for raw_field_id in fields:
+                field_id = str(raw_field_id).strip()
+                if field_id not in field_ids:
+                    return f"Manifest wizard page '{page_id}' references unknown field '{field_id}'"
+                if field_id in seen_fields:
+                    return f"Manifest wizard field '{field_id}' is listed more than once"
+                seen_fields.add(field_id)
+
+        return None
 
     def _plugin_id(self) -> str:
         return str(self.manifest.get('metadata', {}).get('id', '')).strip()
-
-    def _approval_file_path(self) -> Optional[str]:
-        plugin_id = self._plugin_id()
-        if not plugin_id:
-            return None
-        state_home = os.environ.get("XDG_STATE_HOME")
-        if not state_home:
-            state_home = os.path.join(os.path.expanduser("~"), ".local", "state")
-        return os.path.join(state_home, "spark-writer", "approvals", f".{plugin_id}.approval")
-
-    def _legacy_approval_file_path(self) -> Optional[str]:
-        plugin_id = self._plugin_id()
-        if not plugin_id:
-            return None
-        manifest_dir = os.path.dirname(self.manifest_path)
-        return os.path.join(manifest_dir, f".{plugin_id}.approval")
-
-    def get_pending_phase_approval(self, phase_name: str) -> Optional[PendingPhaseApproval]:
-        """Return pending approval data for a lifecycle phase if commands are unapproved."""
-        actions = self.manifest.get('actions', {}).get(phase_name, [])
-        if not actions:
-            return None
-        phase_commands = self._collect_phase_commands(actions)
-        pending = [cmd for cmd in phase_commands if cmd not in self._plugin_allowed_commands]
-        if not pending:
-            return None
-        return PendingPhaseApproval(phase_name, pending)
-
-    def approve_runtime_commands(self, commands: list[str]) -> None:
-        """Persist and activate newly approved runtime commands for this plugin."""
-
-        plugin_id = self._plugin_id()
-        approval_file = self._approval_file_path()
-        if not plugin_id or not approval_file:
-            raise RuntimeError("Plugin metadata.id is required to persist runtime approvals")
-
-        normalized = {str(cmd).strip() for cmd in commands if str(cmd).strip()}
-        merged = sorted(self._plugin_allowed_commands.union(normalized))
-
-        payload = {
-            "plugin_id": plugin_id,
-            "approval_model": APPROVAL_MODEL_VERSION,
-            "approved_commands": merged,
-        }
-
-        try:
-            approval_dir = os.path.dirname(approval_file)
-            os.makedirs(approval_dir, exist_ok=True)
-            with open(approval_file, 'w', encoding='utf-8') as f:
-                json.dump(payload, f, indent=2)
-        except OSError as exc:
-            raise RuntimeError(f"Failed to persist runtime approval for {plugin_id}: {exc}") from exc
-
-        self._plugin_allowed_commands.update(merged)
-        if normalized:
-            logger.info(
-                "Persisted runtime approval for %s: %s",
-                plugin_id,
-                ", ".join(sorted(normalized)),
-            )
-
-    def _collect_phase_commands(self, actions: list[dict[str, Any]]) -> list[str]:
-        """Return unique executable names used by run_command actions in order."""
-
-        phase_commands: list[str] = []
-        seen: set[str] = set()
-        for action in actions:
-            if action.get('type') != 'run_command':
-                continue
-            command = action.get('command') or []
-            if not command:
-                continue
-            cmd_name = command[0]
-            if isinstance(cmd_name, str) and cmd_name and cmd_name not in seen:
-                seen.add(cmd_name)
-                phase_commands.append(cmd_name)
-        return phase_commands
-
-    def _build_runtime_approval_error(self, pending: PendingPhaseApproval) -> RuntimeApprovalRequiredError:
-        return RuntimeApprovalRequiredError(self._plugin_id(), pending)
-
-    def _ensure_phase_runtime_approval(self, phase_name: str, actions: list[dict[str, Any]]) -> None:
-        """Require runtime approval for all pending commands in a lifecycle phase."""
-
-        phase_commands = self._collect_phase_commands(actions)
-        pending = [cmd for cmd in phase_commands if cmd not in self._plugin_allowed_commands]
-        if not pending:
-            return
-        raise self._build_runtime_approval_error(PendingPhaseApproval(phase_name, pending))
 
     def _detect_spark_writer_version(self) -> str:
         """Return the installed spark-writer package version if available."""
@@ -306,290 +270,34 @@ class JsonSparkPlug(SparkPlug):
     def name(self) -> str:
         return self.manifest.get('metadata', {}).get('name', 'Unknown Plugin')
 
+    @property
+    def plugin_id(self) -> str:
+        return self._plugin_id() or self.name
+
     def requires_processing(self) -> bool:
         """Return True if plugin has on_iso_ready actions."""
         actions = self.manifest.get('actions', {})
         return bool(actions.get('on_iso_ready'))
 
-    def register_presets(self) -> Dict[str, Any]:
-        """Return presets defined in manifest, including those from remote feeds."""
-        presets = {}
-        
-        # Load presets from remote feeds first
-        for feed_spec in self.manifest.get('preset_feeds', []):
-            feed_url = feed_spec.get('url', '')
-            if not feed_url.startswith('https://'):
-                logger.warning(f"Skipping non-HTTPS feed: {feed_url}")
-                continue
-                
-            try:
-                feed_presets = self._fetch_preset_feed(feed_url)
-                presets.update(feed_presets)
-                logger.info(f"Loaded {len(feed_presets)} presets from {feed_url}")
-            except Exception as e:
-                logger.error(f"Failed to fetch preset feed {feed_url}: {e}")
-                # Continue loading other feeds
-        
-        # Load static presets from manifest (these override feed presets)
-        for preset in self.manifest.get('presets', []):
-            preset_id = preset.get('id')
-            if preset_id:
-                presets[preset_id] = {
-                    'name': preset.get('name', ''),
-                    'url': preset.get('url', ''),
-                    'sha256': preset.get('sha256', ''),
-                    'distro': preset.get('distro', ''),
-                    **preset.get('metadata', {})
-                }
-        return presets
-    
-    def _fetch_preset_feed(self, feed_url: str) -> Dict[str, Any]:
-        """Fetch and parse a JSON Feed 1.1 preset feed.
-        
-        Args:
-            feed_url: HTTPS URL of the feed
-            
-        Returns:
-            Dictionary of presets {id: {name, url, sha256, distro, ...}}
-        """
-        import json
-        try:
-            import requests
-        except ImportError:
-            logger.warning("requests library not available, skipping feed fetch")
-            return {}
-        
-        try:
-            response = requests.get(feed_url, timeout=10)
-            response.raise_for_status()
-            feed = response.json()
-            
-            # Validate JSON Feed structure
-            if feed.get('version') != 'https://jsonfeed.org/version/1.1':
-                logger.warning(f"Unknown feed version: {feed.get('version')}")
-            
-            presets = {}
-            for item in feed.get('items', []):
-                # Extract preset ID from item.id (format: "preset:ubuntu-24.04")
-                item_id = item.get('id', '')
-                if not item_id.startswith('preset:'):
-                    continue
-                preset_id = item_id.replace('preset:', '', 1)
-                
-                # Find download URLs from attachments
-                url = ''
-                sha256 = ''
-                for attachment in item.get('attachments', []):
-                    mime = attachment.get('mime_type', '')
-                    title = attachment.get('title', '')
-                    
-                    # Prefer torrent, fallback to direct ISO
-                    if 'torrent' in mime or 'torrent' in title.lower():
-                        url = attachment.get('url', '')
-                    elif not url and ('iso' in title.lower() or 'octet-stream' in mime):
-                        url = attachment.get('url', '')
-                    
-                    # Extract checksum if provided
-                    if 'sha256' in attachment:
-                        sha256 = attachment['sha256']
-                
-                if not url:
-                    logger.warning(f"No download URL found for preset {preset_id}")
-                    continue
-                
-                # Extract distro from tags
-                distro = ''
-                tags = item.get('tags', [])
-                distro_tags = ['ubuntu', 'debian', 'proxmox', 'fedora', 'arch']
-                for tag in tags:
-                    if tag.lower() in distro_tags:
-                        distro = tag.lower()
-                        break
-                
-                presets[preset_id] = {
-                    'name': item.get('title', preset_id),
-                    'url': url,
-                    'sha256': sha256,
-                    'distro': distro,
-                    'description': item.get('summary', ''),
-                }
-            
-            return presets
-            
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"Failed to fetch feed: {e}")
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"Invalid JSON in feed: {e}")
-
     def get_config_fields(self) -> List[Dict[str, Any]]:
         """Return config fields from manifest."""
         return self.manifest.get('config_fields', [])
 
-    def should_show_ui(self, preset_id: str, preset_data: Dict[str, Any]) -> bool:
-        """Determine if plugin UI should be shown based on manifest rules."""
-        visibility = self.manifest.get('ui_visibility', {}).get('when', {})
-        
-        # Check distro filter
-        allowed_distros = visibility.get('preset_distro', [])
-        if allowed_distros:
-            distro = preset_data.get('distro', '').lower()
-            if distro not in [d.lower() for d in allowed_distros]:
-                return False
-        
-        # Check preset ID filter
-        allowed_presets = visibility.get('preset_id', [])
-        if allowed_presets:
-            if preset_id not in allowed_presets:
-                return False
-        
-        return True
+    def get_wizard_pages(self) -> List[Dict[str, Any]]:
+        wizard = self.manifest.get("wizard", {})
+        if not isinstance(wizard, dict):
+            return []
+        pages = wizard.get("pages", [])
+        if not isinstance(pages, list):
+            return []
+        return [page for page in pages if isinstance(page, dict)]
 
-    def _evaluate_condition(self, condition: Dict[str, Any], ui_values: Dict[str, Any]) -> bool:
-        """Evaluate a conditional expression.
-        
-        Args:
-            condition: Condition dict with 'field', 'operator', and optional 'value'
-            ui_values: User-provided config values
-            
-        Returns:
-            True if condition matches, False otherwise
-        """
-        field_id = condition.get('field')
-        operator = condition.get('operator')
-        expected = condition.get('value')
-        
-        if not field_id or not operator:
-            return True  # Invalid condition defaults to true
-        
-        actual = ui_values.get(field_id)
-        
-        if operator == 'not_empty':
-            return bool(actual and str(actual).strip())
-        elif operator == 'empty':
-            return not actual or not str(actual).strip()
-        elif operator == 'equals':
-            return actual == expected
-        elif operator == 'not_equals':
-            return actual != expected
-        elif operator == 'in':
-            return actual in (expected if isinstance(expected, list) else [expected])
-        elif operator == 'not_in':
-            return actual not in (expected if isinstance(expected, list) else [expected])
-        
-        return True
+    def _reset_phase_state(self, initial_action_vars: Optional[Dict[str, Any]] = None) -> None:
+        self._exec_ctx.active_phase = self._active_phase_name or "current"
+        self._exec_ctx.reset(initial_action_vars)
 
-    def _resolve_template_string(self, template_value: Any) -> str:
-        """Resolve a template value to a string ready for rendering.
-
-        Three forms are accepted:
-        - str  — used as-is (legacy / inline)
-        - list — joined with newlines (one element per line for readability)
-        - dict with "file" key — loaded from a path relative to the manifest
-        - dict with "asset" key — loaded via manifest assets registry
-        """
-        if isinstance(template_value, str):
-            return template_value
-        if isinstance(template_value, list):
-            return "\n".join(str(line) for line in template_value)
-        if isinstance(template_value, dict):
-            assets = self.manifest.get("assets", {})
-            if assets is None:
-                assets = {}
-            if not isinstance(assets, dict):
-                raise ValueError("Manifest assets section must be an object")
-
-            file_ref = template_value.get("file")
-            asset_ref = template_value.get("asset")
-
-            if file_ref and asset_ref:
-                raise ValueError("Template dict must not define both 'file' and 'asset'")
-            if file_ref:
-                relative_path = normalize_sidecar_ref(file_ref)
-            elif asset_ref:
-                relative_path = resolve_asset_path(assets, asset_ref)
-            else:
-                raise ValueError("Template dict must have a 'file' or 'asset' key")
-
-            manifest_dir = os.path.dirname(os.path.abspath(self.manifest_path))
-            sidecar_path = os.path.join(manifest_dir, relative_path)
-            try:
-                with open(sidecar_path, "r", encoding="utf-8") as fh:
-                    return fh.read()
-            except OSError as exc:
-                raise ValueError(f"Cannot read template file '{relative_path}': {exc}") from exc
-        raise ValueError(f"Unsupported template value type: {type(template_value).__name__}")
-
-    def _render_value(self, value: Any, context: Dict[str, Any]) -> Any:
-        """Render template values recursively."""
-
-        if isinstance(value, str):
-            return self.template_engine.render(value, context)
-        if isinstance(value, dict):
-            return {k: self._render_value(v, context) for k, v in value.items()}
-        if isinstance(value, list):
-            return [self._render_value(item, context) for item in value]
-        return value
-
-    def _render_mapping(self, mapping: Optional[Dict[str, Any]], context: Dict[str, Any]) -> Dict[str, Any]:
-        if not mapping:
-            return {}
-        return {key: self._render_value(val, context) for key, val in mapping.items()}
-
-    def _config_field_defaults(self) -> Dict[str, Any]:
-        """Return default values for declared config fields."""
-
-        defaults: Dict[str, Any] = {}
-        for field in self.manifest.get('config_fields', []):
-            field_id = field.get('id')
-            if not field_id:
-                continue
-            defaults[str(field_id)] = field.get('default', '')
-        return defaults
-
-    def _build_template_context(
-        self,
-        ui_values: Dict[str, Any],
-        preset: Dict[str, Any],
-        iso_path: Optional[str],
-        device_path: Optional[str],
-    ) -> Dict[str, Any]:
-        """Build template context with declared-field defaults and runtime values."""
-
-        context = {
-            **self._config_field_defaults(),
-            **ui_values,
-            **self._action_vars,
-            'iso_path': iso_path,
-            'device_path': device_path,
-            'preset_id': preset.get('id', ''),
-            'preset_name': preset.get('name', ''),
-        }
-
-        # Compatibility bridge for legacy template key naming.
-        if 'apt-cache' not in context and 'apt-proxy' in context:
-            context['apt-cache'] = context.get('apt-proxy', '')
-        if 'apt-proxy' not in context and 'apt-cache' in context:
-            context['apt-proxy'] = context.get('apt-cache', '')
-
-        return context
-
-    def _hash_file(self, file_path: Path, algorithm: str) -> str:
-        """Return hex digest for the provided file."""
-
-        if not file_path.exists():
-            raise RuntimeError(f"File not found: {file_path}")
-
-        try:
-            digest = hashlib.new(algorithm)
-        except ValueError as exc:
-            raise RuntimeError(f"Unsupported hash algorithm: {algorithm}") from exc
-
-        with file_path.open('rb') as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b''):
-                if not chunk:
-                    break
-                digest.update(chunk)
-        return digest.hexdigest()
+    def _clear_phase_state(self) -> None:
+        self._exec_ctx.clear()
 
     def _handle_render_template(
         self, action: Dict[str, Any], context: Dict[str, Any]
@@ -614,27 +322,41 @@ class JsonSparkPlug(SparkPlug):
         logger.debug(f"Rendered template {template_name}")
         return result
 
-    def _handle_write_file(
+    def _handle_create_artifact(
         self, action: Dict[str, Any], context: Dict[str, Any]
     ) -> Optional[str]:
-        content_src = action.get('content', '')
-        path_template = action.get('path', '')
-        permissions = action.get('permissions', '644')
+        action_id = action.get('id', 'unknown')
+        artifact_id = str(action.get('artifact_id', '')).strip()
+        if not artifact_id:
+            raise RuntimeError(f"Action {action_id}: artifact_id is required")
+        if artifact_id in self._exec_ctx.artifacts:
+            raise RuntimeError(f"Action {action_id}: artifact '{artifact_id}' already exists")
 
-        # Render content (either direct string or variable reference)
-        if content_src.startswith('{{') and content_src.endswith('}}'):
-            var_name = content_src[2:-2].strip()
-            content = context.get(var_name, '')
-        else:
-            content = self.template_engine.render(content_src, context)
+        content = self._exec_ctx.resolve_artifact_content(action, context)
+        kind = str(action.get('kind', 'generic')).strip() or 'generic'
+        logical_name = self._exec_ctx.validate_artifact_name(
+            action_id,
+            str(action.get('logical_name') or artifact_id),
+        )
+        media_type = action.get('media_type')
+        executable = bool(action.get('executable', False))
 
-        file_path = self.template_engine.render(path_template, context)
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(content)
-        os.chmod(file_path, int(permissions, 8))
-        logger.info(f"Wrote file: {file_path}")
-        return file_path
+        if executable and kind not in {'script', 'executable'}:
+            raise RuntimeError(
+                f"Action {action_id}: executable artifacts must declare kind 'script' or 'executable'"
+            )
+
+        artifact = ManifestArtifact(
+            artifact_id=artifact_id,
+            content=content,
+            kind=kind,
+            logical_name=logical_name,
+            media_type=str(media_type) if media_type is not None else None,
+            executable=executable,
+        )
+        self._exec_ctx.store_artifact(artifact)
+        logger.info(f"Created artifact: {artifact_id}")
+        return None
 
     def _handle_run_command(
         self, action: Dict[str, Any], context: Dict[str, Any]
@@ -643,54 +365,32 @@ class JsonSparkPlug(SparkPlug):
         use_sudo = action.get('sudo', False)
 
         cmd = [self.template_engine.render(arg, context) for arg in cmd_template]
-
-        # Validate command is allowed (user-approved plugin-specific)
-        cmd_name = cmd[0] if cmd else ''
-        if cmd_name not in self._plugin_allowed_commands:
-            raise self._build_runtime_approval_error(
-                PendingPhaseApproval("current", [cmd_name])
-            )
-
-        if not shutil.which(cmd_name):
-            raise RuntimeError(f"Command '{cmd_name}' not found in PATH")
-
-        # Note: Uses -n (non-interactive) flag for headless operation during autoinstall.
-        # This requires NOPASSWD sudo configuration, which is acceptable because:
-        # 1. Commands are pre-approved by user at plugin install time
-        # 2. The command whitelist + approval system provides security
-        if use_sudo:
-            if not shutil.which('sudo'):
-                raise RuntimeError("sudo is required but not found in PATH")
-            cmd = ['sudo', '-n'] + cmd
-
-        logger.info(f"Running{' (with sudo)' if use_sudo else ''} command")
-        try:
-            proc_result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except subprocess.CalledProcessError as e:
-            # Provide helpful error message for sudo failures
-            if use_sudo and 'sudo: a password is required' in e.stderr:
-                raise RuntimeError(
-                    f"Command requires passwordless sudo. "
-                    f"Configure NOPASSWD for user in /etc/sudoers or run SparkGTK with sudo."
-                ) from e
-            raise RuntimeError(f"Command failed: {e.stderr}") from e
-
-        # For commands with --output flag, use that as result
-        # This handles tools like proxmox-auto-install-assistant
+        output_path = None
         if '--output' in cmd:
             output_idx = cmd.index('--output')
-            result = cmd[output_idx + 1] if output_idx + 1 < len(cmd) else proc_result.stdout.strip()
-        else:
-            result = proc_result.stdout.strip()
+            if output_idx + 1 < len(cmd):
+                output_path = cmd[output_idx + 1]
 
-        if proc_result.stderr:
-            logger.debug(f"Command stderr: {proc_result.stderr}")
-        return result
+        return self._exec_ctx.run_approved_command(
+            cmd,
+            use_sudo=use_sudo,
+            output_path=output_path,
+            build_approval_error=self._build_runtime_approval_error,
+        )
+
+    def _handle_prepare_proxmox_auto_install_iso(
+        self, action: Dict[str, Any], context: Dict[str, Any]
+    ) -> Optional[str]:
+        return installer_schemes.prepare_proxmox_auto_install_iso(
+            self._exec_ctx, action, context, self._build_runtime_approval_error
+        )
+
+    def _handle_prepare_ubuntu_nocloud_iso(
+        self, action: Dict[str, Any], context: Dict[str, Any]
+    ) -> Optional[str]:
+        return installer_schemes.prepare_ubuntu_nocloud_iso(
+            self._exec_ctx, action, context, self._build_runtime_approval_error
+        )
 
     def _handle_compute_file_hash(
         self, action: Dict[str, Any], context: Dict[str, Any]
@@ -757,7 +457,7 @@ class JsonSparkPlug(SparkPlug):
 
         files_var = action.get('files_var')
         if files_var:
-            bundle = self._action_vars.get(files_var)
+            bundle = self._exec_ctx.action_vars.get(files_var)
             if not isinstance(bundle, dict):
                 raise RuntimeError(f"Action {action_id}: files_var '{files_var}' not found")
             files = {str(name): str(content) for name, content in bundle.items()}
@@ -894,23 +594,23 @@ class JsonSparkPlug(SparkPlug):
 
         json_var = action.get('json_output_var')
         if json_var:
-            self._action_vars[json_var] = canonical_json
+            self._exec_ctx.action_vars[json_var] = canonical_json
 
         signature_var = action.get('signature_output_var')
         if signature_var:
-            self._action_vars[signature_var] = signature
+            self._exec_ctx.action_vars[signature_var] = signature
 
         hash_var = action.get('hash_output_var')
         if hash_var:
-            self._action_vars[hash_var] = receipt_hash
+            self._exec_ctx.action_vars[hash_var] = receipt_hash
 
         files_var_name = action.get('files_output_var') or signing_spec.get('files_output_var')
         if files_var_name:
-            self._action_vars[files_var_name] = files_bundle
+            self._exec_ctx.action_vars[files_var_name] = files_bundle
 
         public_key_var = action.get('public_key_output_var') or signing_spec.get('public_key_output_var')
         if public_key_var:
-            self._action_vars[public_key_var] = encoded_public_key
+            self._exec_ctx.action_vars[public_key_var] = encoded_public_key
 
         logger.info(f"Generated receipt payload ({len(canonical_json)} bytes)")
         return canonical_json
@@ -1017,7 +717,7 @@ class JsonSparkPlug(SparkPlug):
         if 'effective_root_password' not in context:
             context['effective_root_password'] = (
                 str(ui_values.get('root-password') or '').strip()
-                or str(self._action_vars.get('_generated_root_password_plaintext') or '').strip()
+                or str(self._exec_ctx.action_vars.get('_generated_root_password_plaintext') or '').strip()
                 or 'AUTO_GENERATED'
             )
 
@@ -1032,7 +732,6 @@ class JsonSparkPlug(SparkPlug):
 
         _dispatch = {
             'render_template':             self._handle_render_template,
-            'write_file':                  self._handle_write_file,
             'run_command':                 self._handle_run_command,
             'compute_file_hash':           self._handle_compute_file_hash,
             'create_partition':            self._handle_create_partition,
@@ -1042,19 +741,21 @@ class JsonSparkPlug(SparkPlug):
             'generate_ephemeral_password': self._handle_generate_ephemeral_password,
             'store_ephemeral_secret':      self._handle_store_ephemeral_secret,
             'show_ephemeral_secret_button': self._handle_show_ephemeral_secret_button,
+            'create_artifact':            self._handle_create_artifact,
+            'prepare_proxmox_auto_install_iso': self._handle_prepare_proxmox_auto_install_iso,
+            'prepare_ubuntu_nocloud_iso': self._handle_prepare_ubuntu_nocloud_iso,
         }
 
         handler = _dispatch.get(action_type)
         if not handler:
-            logger.warning(f"Unknown action type: {action_type}")
-            return None
+            raise RuntimeError(f"Action {action_id}: unsupported action type '{action_type}'")
 
         result = handler(action, context)
 
         # Store result in action variables if requested
         output_var = action.get('output_var')
         if output_var and result is not None:
-            self._action_vars[output_var] = result
+            self._exec_ctx.action_vars[output_var] = result
 
         return result
 
@@ -1074,8 +775,8 @@ class JsonSparkPlug(SparkPlug):
             message=f"Processing ISO with {self.name}",
         )
 
-        # Reset action variables
-        self._action_vars = {'original_iso_path': iso_path}
+        self._active_phase_name = "on_iso_ready"
+        self._reset_phase_state({'original_iso_path': iso_path})
         current_iso = iso_path
 
         try:
@@ -1104,6 +805,9 @@ class JsonSparkPlug(SparkPlug):
                 message=f"Failed: {str(e)}",
             )
             raise
+        finally:
+            self._active_phase_name = None
+            self._clear_phase_state()
 
     def on_write_complete(
         self, device_path: str, preset: Dict[str, Any], ui_values: Dict[str, Any]
@@ -1120,8 +824,8 @@ class JsonSparkPlug(SparkPlug):
             message=f"Post-write processing with {self.name}",
         )
 
-        # Reset action variables
-        self._action_vars = {}
+        self._active_phase_name = "on_write_complete"
+        self._reset_phase_state()
 
         try:
             for action in actions:
@@ -1143,6 +847,9 @@ class JsonSparkPlug(SparkPlug):
                 message=f"Failed: {str(e)}",
             )
             raise
+        finally:
+            self._active_phase_name = None
+            self._clear_phase_state()
     
     def get_ephemeral_secrets(self) -> Dict[str, str]:
         """Return all stored ephemeral secrets.
@@ -1174,3 +881,33 @@ class JsonSparkPlug(SparkPlug):
             True if secrets exist, False otherwise
         """
         return len(self._ephemeral_secrets) > 0
+
+    def get_declared_artifact_ids(self) -> List[str]:
+        artifact_ids: List[str] = []
+        seen: set[str] = set()
+        for actions in self.manifest.get("actions", {}).values():
+            if not isinstance(actions, list):
+                continue
+            for action in actions:
+                artifact_id = str(action.get("artifact_id", "")).strip()
+                if artifact_id and artifact_id not in seen:
+                    seen.add(artifact_id)
+                    artifact_ids.append(artifact_id)
+        return artifact_ids
+
+    def get_declared_host_action_types(self) -> List[str]:
+        host_owned = {
+            "prepare_ubuntu_nocloud_iso",
+            "prepare_proxmox_auto_install_iso",
+        }
+        action_types: List[str] = []
+        seen: set[str] = set()
+        for actions in self.manifest.get("actions", {}).values():
+            if not isinstance(actions, list):
+                continue
+            for action in actions:
+                action_type = str(action.get("type", "")).strip()
+                if action_type in host_owned and action_type not in seen:
+                    seen.add(action_type)
+                    action_types.append(action_type)
+        return action_types

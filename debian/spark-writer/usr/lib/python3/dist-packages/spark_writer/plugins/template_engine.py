@@ -1,20 +1,38 @@
-"""Template rendering for SparkPlug manifests.
+"""Dependency-free template rendering for SparkPlug manifests.
 
-Supports Jinja-style control flow and variable substitution while preserving
-compatibility with hyphenated field identifiers used by manifest config IDs.
+Supports simple variable substitution and truthy conditional blocks while
+preserving compatibility with hyphenated field identifiers used by manifest
+config IDs.
 """
 
 import re
-from typing import Any, Dict
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from jinja2 import StrictUndefined
-from jinja2.exceptions import TemplateError, TemplateSyntaxError
-from jinja2.sandbox import SandboxedEnvironment
+
+@dataclass(frozen=True)
+class _TextNode:
+    value: str
+
+
+@dataclass(frozen=True)
+class _VarNode:
+    name: str
+
+
+@dataclass(frozen=True)
+class _IfNode:
+    name: str
+    true_branch: List["_Node"]
+    false_branch: List["_Node"]
+
+
+_Node = Union[_TextNode, _VarNode, _IfNode]
 
 
 class SparkTemplateEngine:
-    """Jinja-based rendering for user-controlled template content.
-    
+    """Small renderer for user-controlled template content.
+
     Design philosophy:
     - Users provide complete scripts/content
     - Variables are their own data (authkeys, hostnames, etc.)
@@ -22,109 +40,120 @@ class SparkTemplateEngine:
     - Fails fast on undefined variables
     """
 
-    _JINJA_BLOCK_PATTERN = re.compile(r"(\{\{.*?\}\}|\{%.*?%\})", re.DOTALL)
-
-    def __init__(self) -> None:
-        # Keep rendering deterministic and fail fast for missing variables.
-        self._env = SandboxedEnvironment(undefined=StrictUndefined, autoescape=False)
+    _TOKEN_PATTERN = re.compile(r"(\{\{.*?\}\}|\{%.*?%\})", re.DOTALL)
+    _NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 
     def validate_template(self, template_string: str) -> bool:
         """Validate template syntax."""
         try:
-            self._env.parse(template_string)
+            self._parse(template_string)
             return True
-        except TemplateSyntaxError:
-            return False
-        except Exception:
+        except ValueError:
             return False
 
     def _build_aliases(self, values: Dict[str, Any]) -> Dict[str, str]:
-        """Map hyphenated keys to Jinja-safe aliases."""
+        """Map hyphenated keys to underscore aliases."""
         aliases: Dict[str, str] = {}
         for key in values:
             if '-' in key:
                 aliases[key] = key.replace('-', '_')
         return aliases
 
-    def _replace_identifiers(self, text: str, aliases: Dict[str, str]) -> str:
-        """Replace aliased identifiers in expressions, skipping quoted literals."""
-        if not aliases:
-            return text
+    def _validate_name(self, name: str) -> str:
+        normalized = name.strip()
+        if not normalized or not self._NAME_PATTERN.match(normalized):
+            raise ValueError(f"Invalid template identifier: '{name}'")
+        return normalized
 
-        keys = sorted(aliases.keys(), key=len, reverse=True)
-        out: list[str] = []
-        i = 0
-        in_single = False
-        in_double = False
+    def _parse_tag(self, token: str) -> Tuple[str, str]:
+        if token.startswith("{{"):
+            return ("var", self._validate_name(token[2:-2]))
 
-        while i < len(text):
-            ch = text[i]
-            if ch == "'" and not in_double:
-                in_single = not in_single
-                out.append(ch)
-                i += 1
+        tag = token[2:-2].strip()
+        if tag == "else":
+            return ("else", "")
+        if tag == "endif":
+            return ("endif", "")
+        if tag.startswith("if "):
+            return ("if", self._validate_name(tag[3:]))
+        raise ValueError(f"Unsupported template tag: '{tag}'")
+
+    def _parse(
+        self,
+        template_string: str,
+        start_pos: int = 0,
+        stop_tags: Optional[set[str]] = None,
+    ) -> Tuple[List[_Node], int, Optional[str]]:
+        nodes: List[_Node] = []
+        pos = start_pos
+        stop_tags = stop_tags or set()
+
+        while True:
+            match = self._TOKEN_PATTERN.search(template_string, pos)
+            if not match:
+                if pos < len(template_string):
+                    nodes.append(_TextNode(template_string[pos:]))
+                return nodes, len(template_string), None
+
+            if match.start() > pos:
+                nodes.append(_TextNode(template_string[pos:match.start()]))
+
+            tag_type, tag_value = self._parse_tag(match.group(0))
+            pos = match.end()
+
+            if tag_type in stop_tags:
+                return nodes, pos, tag_type
+            if tag_type in {"else", "endif"}:
+                raise ValueError(f"Unexpected template tag: '{tag_type}'")
+            if tag_type == "var":
+                nodes.append(_VarNode(tag_value))
                 continue
-            if ch == '"' and not in_single:
-                in_double = not in_double
-                out.append(ch)
-                i += 1
-                continue
 
-            if in_single or in_double:
-                out.append(ch)
-                i += 1
-                continue
+            true_branch, pos, stop_tag = self._parse(
+                template_string,
+                pos,
+                {"else", "endif"},
+            )
+            false_branch: List[_Node] = []
 
-            replaced = False
-            for key in keys:
-                if not text.startswith(key, i):
-                    continue
+            if stop_tag == "else":
+                false_branch, pos, stop_tag = self._parse(
+                    template_string,
+                    pos,
+                    {"endif"},
+                )
+            if stop_tag != "endif":
+                raise ValueError(f"Missing endif for template if: '{tag_value}'")
 
-                prev_char = text[i - 1] if i > 0 else ''
-                next_idx = i + len(key)
-                next_char = text[next_idx] if next_idx < len(text) else ''
+            nodes.append(_IfNode(tag_value, true_branch, false_branch))
 
-                if (prev_char and (prev_char.isalnum() or prev_char == '_')):
-                    continue
-                if (next_char and (next_char.isalnum() or next_char == '_')):
-                    continue
+    def _resolve_name(self, name: str, context: Dict[str, Any]) -> Any:
+        if name in context:
+            return context[name]
+        raise ValueError(f"'{name}' is undefined")
 
-                out.append(aliases[key])
-                i += len(key)
-                replaced = True
-                break
-
-            if replaced:
-                continue
-
-            out.append(ch)
-            i += 1
-
-        return ''.join(out)
-
-    def _normalize_template(self, template_string: str, aliases: Dict[str, str]) -> str:
-        """Apply alias replacement inside Jinja expression/control blocks only."""
-
-        def repl(match: re.Match[str]) -> str:
-            block = match.group(0)
-            if block.startswith('{{'):
-                inner = block[2:-2]
-                return '{{' + self._replace_identifiers(inner, aliases) + '}}'
-            inner = block[2:-2]
-            return '{%' + self._replace_identifiers(inner, aliases) + '%}'
-
-        return self._JINJA_BLOCK_PATTERN.sub(repl, template_string)
+    def _render_nodes(self, nodes: List[_Node], context: Dict[str, Any]) -> str:
+        rendered: List[str] = []
+        for node in nodes:
+            if isinstance(node, _TextNode):
+                rendered.append(node.value)
+            elif isinstance(node, _VarNode):
+                rendered.append(str(self._resolve_name(node.name, context)))
+            else:
+                branch = node.true_branch if self._resolve_name(node.name, context) else node.false_branch
+                rendered.append(self._render_nodes(branch, context))
+        return "".join(rendered)
 
     def render(self, template_string: str, values: Dict[str, Any]) -> str:
         """Render a template with user-provided values.
-        
+
         Args:
             template_string: User's script/content with {{variable}} placeholders
             values: User-provided configuration values
-            
+
         Returns:
             String with variables replaced
-            
+
         Raises:
             ValueError: If template is invalid or references undefined variables
         """
@@ -133,10 +162,10 @@ class SparkTemplateEngine:
         for original, alias in aliases.items():
             context[alias] = values[original]
 
-        normalized = self._normalize_template(template_string, aliases)
-        try:
-            template = self._env.from_string(normalized)
-            return template.render(**context)
-        except TemplateError as exc:
-            raise ValueError(str(exc)) from exc
-
+        nodes, _, stop_tag = self._parse(template_string)
+        if stop_tag is not None:
+            raise ValueError(f"Unexpected template tag: '{stop_tag}'")
+        rendered = self._render_nodes(nodes, context)
+        if rendered.endswith("\n"):
+            return rendered[:-1]
+        return rendered

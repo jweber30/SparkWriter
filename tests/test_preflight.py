@@ -15,7 +15,6 @@ from usb_writer_core.preflight import (
     CheckResult,
     MINIMUM_PYTHON,
     REQUIRED_TOOLS,
-    check_crostini_environment,
     check_not_running_as_root,
     check_python_version,
     check_recommended_tools,
@@ -136,29 +135,6 @@ class TestCheckNotRunningAsRoot:
         with patch("usb_writer_core.preflight.os.geteuid", return_value=1):
             result = check_not_running_as_root()
         assert result.passed
-
-
-# ---------------------------------------------------------------------------
-# check_crostini_environment
-# ---------------------------------------------------------------------------
-
-class TestCheckCrostiniEnvironment:
-    def test_detected_when_env_var_present(self):
-        with patch.dict("os.environ", {"CROS_CONTAINER_VERSION": "108"}):
-            result = check_crostini_environment()
-        assert result.passed
-        assert "108" in result.message
-
-    def test_not_fatal_when_absent(self):
-        with patch.dict("os.environ", _env_without("CROS_CONTAINER_VERSION"), clear=True):
-            result = check_crostini_environment()
-        assert not result.passed
-        assert not result.fatal  # operator warning only
-
-    def test_absent_message_mentions_crostini(self):
-        with patch.dict("os.environ", _env_without("CROS_CONTAINER_VERSION"), clear=True):
-            result = check_crostini_environment()
-        assert "Crostini" in result.message
 
 
 # ---------------------------------------------------------------------------

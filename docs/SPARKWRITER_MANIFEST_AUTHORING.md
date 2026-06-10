@@ -223,11 +223,12 @@ The source-based selectors are the most important ones for current SparkWriter f
 - `{ "file": "relative/path" }`
 - `{ "asset": "asset-name" }`
 
-Template rendering uses Jinja with sandboxing and `StrictUndefined`.
+Template rendering uses SparkWriter's dependency-free renderer.
 
 That means:
 
-- loops and conditionals work
+- variable substitution works with `{{field_id}}`
+- truthy conditionals work with `{% if field_id %}`, optional `{% else %}`, and `{% endif %}`
 - undefined values fail fast
 - template sidecars must stay relative to the manifest and may not escape its directory
 
@@ -240,7 +241,7 @@ Current template context includes:
 - `preset_id`
 - `preset_name`
 
-Hyphenated field IDs are also aliased for Jinja use. For example, `root-password` can be referenced as `{{ root_password }}`.
+Hyphenated field IDs can be referenced directly, such as `{{root-password}}`, and are also available through underscore aliases such as `{{root_password}}`.
 
 ## Actions
 
