@@ -2,6 +2,8 @@
 
 A native GTK4/LibAdwaita application designed to be modular and lightweight.
 
+Looking for code reviews, security audits, and edge-case testing on the core generation logic. The code was heavily written by AI (various models) over two years as I learned industry standards and upped my Python skill.
+
 ## Document Status And Provenance
 
 This README is the practical usage and development guide.
