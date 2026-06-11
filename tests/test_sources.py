@@ -257,6 +257,32 @@ def test_json_plugin_accepts_new_manifest_version_with_return_delivery(tmp_path)
     assert spec["endpoints"][0]["label"] == "Ops"
 
 
+def test_json_plugin_accepts_current_manifest_version_with_torrent_artifact(tmp_path):
+    manifest = {
+        "version": "1.5",
+        "metadata": {"id": "current-version", "name": "Current Version"},
+        "requires": {"commands": []},
+        "source": {
+            "id": "current-source",
+            "name": "Current Source",
+            "family": "ubuntu",
+            "url": "https://example.com/current.torrent",
+            "acquire": {
+                "kind": "torrent",
+                "url": "https://example.com/current.torrent",
+                "artifact": "current.iso",
+            },
+        },
+    }
+
+    plugin = _write_plugin(tmp_path, "current-version", manifest)
+
+    assert plugin.is_available
+    source = Source.from_dict(plugin.register_sources()[0])
+    assert source.acquire_kind == "torrent"
+    assert source.acquire_artifact == "current.iso"
+
+
 def test_json_plugin_rejects_legacy_manifest_version(tmp_path):
     manifest = {
         "version": "1.0",
