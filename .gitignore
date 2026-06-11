@@ -21,6 +21,7 @@ dist/
 
 # Debian helper/generated files
 debian/.debhelper/
+debian/spark-writer/usr
 debian/debhelper-build-stamp
 debian/files
 debian/*.debhelper.log
@@ -28,8 +29,13 @@ debian/*.substvars
 debian/*.postinst.debhelper
 debian/*.prerm.debhelper
 
+# Local/private manifests and secrets
+*.local.json
+*.secret.json
+.env
+.env.*
+secrets/
+private/
 
-*.txt
-*.json
 !src/spark_writer/plugins/installed/*.json
 !src/spark_writer/plugins/schema/*.json
