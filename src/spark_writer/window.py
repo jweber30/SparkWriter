@@ -19,8 +19,14 @@ from .plugins.json_plugin import RuntimeApprovalRequiredError
 from .plugins.manager import PluginManager
 from .profile import ProfileStore
 from .receipts import build_receipt_payload
+from .return_delivery import (
+    build_return_delivery_payload,
+    deliver_return_payload,
+    is_secure_return_url,
+)
 from .sources import Source
 from .core.downloader import Downloader
+from usb_writer_core.receipts import current_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +148,7 @@ class SparkWindow(Adw.ApplicationWindow):
         self._wizard_builders: List[ConfigFormBuilder] = []
         self._wizard_page_ids: List[str] = []
         self._profile_prompted_pages: set[str] = set()
+        self._return_endpoint_options: List[Dict[str, str]] = []
         
         # Create Pages
         self.config_page = self._create_config_page()
@@ -303,6 +310,29 @@ class SparkWindow(Adw.ApplicationWindow):
         self._final_download_status_row = Adw.ActionRow(title="No download started")
         self._final_download_status_row.set_icon_name("folder-download-symbolic")
         self._final_status_group.add(self._final_download_status_row)
+
+        self._return_delivery_group = Adw.PreferencesGroup(
+            title="Return Delivery",
+            description="Send declared SparkPlug secrets and receipt context to a secure endpoint after write."
+        )
+        self._final_pref_page.add(self._return_delivery_group)
+
+        self._return_endpoint_row = Adw.ComboRow(title="Endpoint")
+        self._return_endpoint_row.set_icon_name("network-workgroup-symbolic")
+        self._return_endpoint_row.connect("notify::selected", self._on_return_endpoint_changed)
+        self._return_delivery_group.add(self._return_endpoint_row)
+
+        self._return_endpoint_url_row = Adw.EntryRow(title="Endpoint URL")
+        self._return_endpoint_url_row.connect("notify::text", lambda *_: self._update_flash_button_state())
+        self._return_delivery_group.add(self._return_endpoint_url_row)
+
+        if hasattr(Adw, "PasswordEntryRow"):
+            self._return_bearer_token_row = Adw.PasswordEntryRow(title="Bearer Token")
+        else:
+            self._return_bearer_token_row = Adw.EntryRow(title="Bearer Token")
+        self._return_bearer_token_row.connect("notify::text", lambda *_: self._update_flash_button_state())
+        self._return_delivery_group.add(self._return_bearer_token_row)
+        self._return_delivery_group.set_visible(False)
 
         final_action_bar = Gtk.ActionBar()
         toolbar_view.add_bottom_bar(final_action_bar)
@@ -508,6 +538,7 @@ class SparkWindow(Adw.ApplicationWindow):
         self._selection_error = self._plugin_manager.validate_plugin_selection(self.selected_sparkplugs)
         self._clear_wizard_pages()
         self._rebuild_selected_config_form()
+        self._update_return_delivery_ui()
         self._update_flash_button_state()
 
     def _rebuild_selected_config_form(self) -> None:
@@ -633,6 +664,7 @@ class SparkWindow(Adw.ApplicationWindow):
         if self.nav_view.get_visible_page() != self.final_page:
             self.nav_view.push(self.final_page)
         self._refresh_drives()
+        self._update_return_delivery_ui()
         self._update_download_status_ui()
         self._update_flash_button_state()
 
@@ -1342,12 +1374,14 @@ class SparkWindow(Adw.ApplicationWindow):
             self.pipeline.complete_stage(PipelineStage.WRITE)
             self.pipeline.success("Flash completed successfully!")
 
-        self._latest_receipt_payload = self._build_receipt_payload(device_info=self._selected_drive_info())
+        device_info = self._selected_drive_info()
+        self._latest_receipt_payload = self._build_receipt_payload(device_info=device_info)
         secrets = self._collect_completion_secrets()
+        delivery_message = self._deliver_return_payload(secrets, device_info)
         if secrets:
             self._update_secrets_display(secrets)
         
-        self.status_label.set_text("Done!")
+        self.status_label.set_text(delivery_message or "Done!")
         self._status_page.set_title("Success")
         self._status_page.set_icon_name("emblem-ok-symbolic")
         self._reset_flash_state()
@@ -1505,6 +1539,7 @@ class SparkWindow(Adw.ApplicationWindow):
         save_supported = all(plugin.supports_save_iso() for plugin in self.selected_sparkplugs)
         usb_supported = all(plugin.supports_usb_write() for plugin in self.selected_sparkplugs)
         early_supported = self._supports_early_download(self.current_source)
+        return_delivery_ready = self._is_return_delivery_ready()
 
         if hasattr(self, "_download_continue_btn"):
             download_enabled = (
@@ -1534,6 +1569,7 @@ class SparkWindow(Adw.ApplicationWindow):
             and not self._flash_in_progress
             and usb_supported
             and bool(self.current_source and self.current_source.can_write_usb)
+            and return_delivery_ready
         )
         self._flash_btn.set_sensitive(flash_enabled)
         
@@ -1569,6 +1605,8 @@ class SparkWindow(Adw.ApplicationWindow):
             self._flash_btn.set_tooltip_text("Please fill in all required fields")
         elif not self.drives:
             self._flash_btn.set_tooltip_text("No USB drives detected")
+        elif not return_delivery_ready:
+            self._flash_btn.set_tooltip_text("Enter an HTTPS or localhost return delivery endpoint")
         else:
             self._flash_btn.set_tooltip_text("Write ISO to the selected USB drive")
 
@@ -1593,6 +1631,170 @@ class SparkWindow(Adw.ApplicationWindow):
             processed_iso_path=getattr(self, "_last_processed_iso_path", None),
             device_info=device_info,
         )
+
+    def _return_delivery_required(self) -> bool:
+        return any(
+            bool(getattr(plugin, "requires_return_delivery", lambda: False)())
+            for plugin in self.selected_sparkplugs
+        )
+
+    def _collect_return_endpoint_options(self) -> List[Dict[str, str]]:
+        options: List[Dict[str, str]] = []
+        seen: set[str] = set()
+        for plugin in self.selected_sparkplugs:
+            spec = getattr(plugin, "get_return_delivery_spec", lambda: {})()
+            for endpoint in spec.get("endpoints", []):
+                if not isinstance(endpoint, dict):
+                    continue
+                endpoint_id = str(endpoint.get("id", "")).strip()
+                url = str(endpoint.get("url", "")).strip()
+                if not endpoint_id or endpoint_id in seen:
+                    continue
+                seen.add(endpoint_id)
+                options.append(
+                    {
+                        "id": endpoint_id,
+                        "label": str(endpoint.get("label") or endpoint_id),
+                        "url": url,
+                    }
+                )
+        options.append({"id": "custom", "label": "Custom", "url": ""})
+        return options
+
+    def _update_return_delivery_ui(self) -> None:
+        if not hasattr(self, "_return_delivery_group"):
+            return
+        required = self._return_delivery_required()
+        self._return_delivery_group.set_visible(required)
+        if not required:
+            return
+
+        current_url = self._return_endpoint_url_row.get_text().strip()
+        self._return_endpoint_options = self._collect_return_endpoint_options()
+        model = Gtk.StringList()
+        for option in self._return_endpoint_options:
+            model.append(option["label"])
+        self._return_endpoint_row.set_model(model)
+        self._return_endpoint_row.set_selected(0 if self._return_endpoint_options else Gtk.INVALID_LIST_POSITION)
+
+        selected = self._selected_return_endpoint_option()
+        if selected and selected.get("url") and not current_url:
+            self._return_endpoint_url_row.set_text(selected["url"])
+
+    def _selected_return_endpoint_option(self) -> Optional[Dict[str, str]]:
+        selected = self._return_endpoint_row.get_selected()
+        if selected == Gtk.INVALID_LIST_POSITION:
+            return None
+        if selected >= len(self._return_endpoint_options):
+            return None
+        return self._return_endpoint_options[selected]
+
+    def _on_return_endpoint_changed(self, *_args) -> None:
+        selected = self._selected_return_endpoint_option()
+        if selected and selected.get("url"):
+            self._return_endpoint_url_row.set_text(selected["url"])
+        self._update_flash_button_state()
+
+    def _return_endpoint_url(self) -> str:
+        if not hasattr(self, "_return_endpoint_url_row"):
+            return ""
+        return self._return_endpoint_url_row.get_text().strip()
+
+    def _return_bearer_token(self) -> str:
+        if not hasattr(self, "_return_bearer_token_row"):
+            return ""
+        return self._return_bearer_token_row.get_text().strip()
+
+    def _is_return_delivery_ready(self) -> bool:
+        if not self._return_delivery_required():
+            return True
+        return is_secure_return_url(self._return_endpoint_url())
+
+    def _collect_declared_return_secrets(self) -> Dict[str, Dict[str, str]]:
+        payload: Dict[str, Dict[str, str]] = {}
+        for plugin in self.selected_sparkplugs:
+            spec = getattr(plugin, "get_return_delivery_spec", lambda: {})()
+            secret_keys = spec.get("secrets", [])
+            if not secret_keys:
+                continue
+            try:
+                plugin_secrets = plugin.get_ephemeral_secrets()
+            except Exception as exc:
+                logger.warning("Failed to retrieve return delivery secrets: %s", exc)
+                continue
+            selected: Dict[str, str] = {}
+            for key in secret_keys:
+                key_name = str(key).strip()
+                value = plugin_secrets.get(key_name)
+                if value is not None and str(value).strip():
+                    selected[key_name] = str(value)
+            if selected:
+                plugin_id = str(getattr(plugin, "plugin_id", getattr(plugin, "name", "plugin")))
+                payload[plugin_id] = selected
+        return payload
+
+    def _delivery_sparkplug_identities(self) -> List[Dict[str, Any]]:
+        identities: List[Dict[str, Any]] = []
+        for plugin in self.selected_sparkplugs:
+            if not getattr(plugin, "requires_return_delivery", lambda: False)():
+                continue
+            metadata = getattr(plugin, "manifest", {}).get("metadata", {})
+            identity: Dict[str, Any] = {
+                "id": getattr(plugin, "plugin_id", getattr(plugin, "name", "unknown")),
+                "name": getattr(plugin, "name", "Unknown SparkPlug"),
+            }
+            if metadata.get("version"):
+                identity["version"] = metadata["version"]
+            identities.append(identity)
+        return identities
+
+    def _deliver_return_payload(
+        self,
+        secrets: Dict[str, str],
+        device_info: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        if not self._return_delivery_required():
+            return None
+
+        endpoint_url = self._return_endpoint_url()
+        if not is_secure_return_url(endpoint_url):
+            return "Done. Return delivery skipped: enter an HTTPS or localhost endpoint."
+
+        return_secrets = self._collect_declared_return_secrets()
+        if not return_secrets:
+            return "Done. Return delivery skipped: no declared secrets were available."
+
+        receipt_payload = self._latest_receipt_payload or {}
+        generated_at = str(
+            receipt_payload.get("identity", {}).get("generated_at")
+            if isinstance(receipt_payload, dict)
+            else ""
+        ) or current_timestamp()
+
+        payload = build_return_delivery_payload(
+            sparkplugs=self._delivery_sparkplug_identities(),
+            secrets=return_secrets,
+            receipt=self._latest_receipt_payload,
+            source=self.current_source.to_dict() if self.current_source else None,
+            device=device_info,
+            generated_at=generated_at,
+        )
+
+        try:
+            result = deliver_return_payload(
+                endpoint_url=endpoint_url,
+                payload=payload,
+                bearer_token=self._return_bearer_token(),
+            )
+        except ValueError as exc:
+            logger.warning("Return delivery skipped: %s", exc)
+            return f"Done. Return delivery skipped: {exc}"
+
+        if result.success:
+            return "Done. Return delivery succeeded."
+
+        logger.warning("Return delivery failed: %s", result.message)
+        return f"Done. {result.message}"
 
     def _collect_completion_secrets(self) -> Dict[str, str]:
         """Collect secrets to display on completion, including root password fallbacks."""

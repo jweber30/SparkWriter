@@ -228,6 +228,108 @@ def test_json_plugin_rejects_unknown_wizard_field(tmp_path):
     assert "unknown field 'missing'" in (plugin.unavailable_reason or "")
 
 
+def test_json_plugin_accepts_new_manifest_version_with_return_delivery(tmp_path):
+    manifest = {
+        "version": "1.4",
+        "metadata": {"id": "delivery-demo", "name": "Delivery Demo"},
+        "requires": {"commands": []},
+        "return_delivery": {
+            "enabled": True,
+            "secrets": ["admin_password", "join_token"],
+            "endpoints": [
+                {
+                    "id": "ops",
+                    "label": "Ops",
+                    "url": "https://ops.example.com/sparkwriter",
+                }
+            ],
+        },
+    }
+
+    plugin = _write_plugin(tmp_path, "delivery-demo", manifest)
+
+    assert plugin.is_available
+    assert plugin.requires_return_delivery() is True
+    spec = plugin.get_return_delivery_spec()
+    assert spec["secrets"] == ["admin_password", "join_token"]
+    assert spec["endpoints"][0]["label"] == "Ops"
+
+
+def test_json_plugin_rejects_return_delivery_on_legacy_manifest(tmp_path):
+    manifest = {
+        "version": "1.0",
+        "metadata": {"id": "legacy-delivery", "name": "Legacy Delivery"},
+        "requires": {"commands": []},
+        "return_delivery": {"secrets": ["admin_password"]},
+    }
+
+    plugin = _write_plugin(tmp_path, "legacy-delivery", manifest)
+
+    assert not plugin.is_available
+    assert "requires manifest version 1.4" in (plugin.unavailable_reason or "")
+
+
+def test_json_plugin_rejects_future_manifest_version_with_supported_versions(tmp_path):
+    manifest = {
+        "version": "9.9",
+        "metadata": {"id": "future", "name": "Future"},
+        "requires": {"commands": []},
+    }
+
+    plugin = _write_plugin(tmp_path, "future", manifest)
+
+    assert not plugin.is_available
+    reason = plugin.unavailable_reason or ""
+    assert "Unsupported manifest version: 9.9" in reason
+    assert "1.0, 1.4" in reason
+
+
+def test_json_plugin_rejects_non_https_return_endpoint(tmp_path):
+    manifest = {
+        "version": "1.4",
+        "metadata": {"id": "bad-endpoint", "name": "Bad Endpoint"},
+        "requires": {"commands": []},
+        "return_delivery": {
+            "secrets": ["admin_password"],
+            "endpoints": [
+                {
+                    "id": "plain",
+                    "label": "Plain HTTP",
+                    "url": "http://ops.example.com/sparkwriter",
+                }
+            ],
+        },
+    }
+
+    plugin = _write_plugin(tmp_path, "bad-endpoint", manifest)
+
+    assert not plugin.is_available
+    assert "must use HTTPS or localhost HTTP" in (plugin.unavailable_reason or "")
+
+
+def test_json_plugin_accepts_localhost_http_return_endpoint(tmp_path):
+    manifest = {
+        "version": "1.4",
+        "metadata": {"id": "local-endpoint", "name": "Local Endpoint"},
+        "requires": {"commands": []},
+        "return_delivery": {
+            "secrets": ["admin_password"],
+            "endpoints": [
+                {
+                    "id": "local",
+                    "label": "Local Collector",
+                    "url": "http://localhost:8765/sparkwriter",
+                }
+            ],
+        },
+    }
+
+    plugin = _write_plugin(tmp_path, "local-endpoint", manifest)
+
+    assert plugin.is_available
+    assert plugin.get_return_delivery_spec()["endpoints"][0]["url"].startswith("http://localhost")
+
+
 def test_builtin_ubuntu_autoinstall_uses_source_compatibility(ubuntu_autoinstall_plugin):
     assert ubuntu_autoinstall_plugin.should_show_ui(
         "ubuntu-24.04-server",

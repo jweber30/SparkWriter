@@ -404,6 +404,28 @@ def test_schema_requires_install_disclosure_fields_for_commands():
     assert "allow_plugin_specific" in required
 
 
+def test_schema_declares_manifest_version_1_4_and_return_delivery():
+    schema_path = (
+        PACKAGE_ROOT
+        / "src"
+        / "spark_writer"
+        / "plugins"
+        / "schema"
+        / "sparkplug_manifest.schema.json"
+    )
+
+    with open(schema_path, "r", encoding="utf-8") as f:
+        schema = json.load(f)
+
+    assert schema["properties"]["version"]["const"] == "1.4"
+    return_delivery = schema["properties"]["return_delivery"]
+    assert "secrets" in return_delivery["properties"]
+    assert "endpoints" in return_delivery["properties"]
+    pattern = schema["definitions"]["return_endpoint"]["properties"]["url"]["pattern"]
+    assert "https://" in pattern
+    assert "localhost" in pattern
+
+
 def test_schema_declares_wizard_pages():
     schema_path = (
         PACKAGE_ROOT

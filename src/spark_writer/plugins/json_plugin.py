@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from usb_writer_core import receipts as receipt_utils
 from usb_writer_core import writer as usb_writer
+from ..return_delivery import is_secure_return_url
 
 from .action_context import (
     ActionContext,
@@ -28,6 +29,9 @@ from . import installer_schemes
 logger = logging.getLogger(__name__)
 
 __all__ = ["APPROVAL_MODEL_VERSION", "JsonSparkPlug", "RuntimeApprovalRequiredError"]
+
+SUPPORTED_MANIFEST_VERSIONS = ("1.0", "1.4")
+RETURN_DELIVERY_MANIFEST_VERSION = "1.4"
 
 
 class JsonSparkPlug(
@@ -103,9 +107,22 @@ class JsonSparkPlug(
             return
 
         # Validate required top-level fields
-        if self.manifest.get('version') != '1.0':
+        manifest_version = str(self.manifest.get('version', '')).strip()
+        if manifest_version not in SUPPORTED_MANIFEST_VERSIONS:
             self._available = False
-            self._unavailable_reason = "Unsupported manifest version"
+            supported = ", ".join(SUPPORTED_MANIFEST_VERSIONS)
+            self._unavailable_reason = (
+                f"Unsupported manifest version: {manifest_version or 'missing'}; "
+                f"this SparkWriter supports: {supported}"
+            )
+            return
+
+        if self.manifest.get("return_delivery") and manifest_version != RETURN_DELIVERY_MANIFEST_VERSION:
+            self._available = False
+            self._unavailable_reason = (
+                "return_delivery requires manifest version "
+                f"{RETURN_DELIVERY_MANIFEST_VERSION}"
+            )
             return
 
         if 'metadata' not in self.manifest or 'requires' not in self.manifest:
@@ -142,6 +159,12 @@ class JsonSparkPlug(
             self._unavailable_reason = action_error
             return
 
+        return_delivery_error = self._validate_return_delivery()
+        if return_delivery_error:
+            self._available = False
+            self._unavailable_reason = return_delivery_error
+            return
+
         wizard_error = self._validate_manifest_wizard()
         if wizard_error:
             self._available = False
@@ -165,6 +188,48 @@ class JsonSparkPlug(
                     return f"Action {action_id}: {self._RETIRED_ACTION_TYPES[action_type]}"
                 if action_type not in self._SUPPORTED_ACTION_TYPES:
                     return f"Action {action_id}: unsupported action type '{action_type}'"
+
+        return None
+
+    def _validate_return_delivery(self) -> Optional[str]:
+        spec = self.manifest.get("return_delivery")
+        if not spec:
+            return None
+        if not isinstance(spec, dict):
+            return "return_delivery must be an object"
+
+        if not bool(spec.get("enabled", True)):
+            return None
+
+        secrets_spec = spec.get("secrets", [])
+        if not isinstance(secrets_spec, list):
+            return "return_delivery.secrets must be an array"
+        for idx, key in enumerate(secrets_spec, start=1):
+            if not str(key).strip():
+                return f"return_delivery.secrets item {idx} must not be empty"
+
+        endpoints = spec.get("endpoints", [])
+        if endpoints is None:
+            endpoints = []
+        if not isinstance(endpoints, list):
+            return "return_delivery.endpoints must be an array"
+        seen_ids: set[str] = set()
+        for idx, endpoint in enumerate(endpoints, start=1):
+            if not isinstance(endpoint, dict):
+                return f"return_delivery.endpoints item {idx} must be an object"
+            endpoint_id = str(endpoint.get("id", "")).strip()
+            label = str(endpoint.get("label", "")).strip()
+            url = str(endpoint.get("url", "")).strip()
+            if not endpoint_id or not label or not url:
+                return f"return_delivery.endpoints item {idx} requires id, label, and url"
+            if endpoint_id in seen_ids:
+                return f"return_delivery endpoint '{endpoint_id}' is duplicated"
+            seen_ids.add(endpoint_id)
+            if not is_secure_return_url(url):
+                return (
+                    f"return_delivery endpoint '{endpoint_id}' must use HTTPS "
+                    "or localhost HTTP"
+                )
 
         return None
 
@@ -879,6 +944,44 @@ class JsonSparkPlug(
             Dictionary of secret keys and values stored in memory
         """
         return self._ephemeral_secrets.copy()
+
+    def get_return_delivery_spec(self) -> Dict[str, Any]:
+        """Return the manifest-declared return delivery contract, if enabled."""
+
+        spec = self.manifest.get("return_delivery")
+        if not isinstance(spec, dict) or not bool(spec.get("enabled", True)):
+            return {}
+
+        secrets_spec = spec.get("secrets", [])
+        endpoints_spec = spec.get("endpoints", [])
+        secrets_list = [
+            str(key).strip()
+            for key in secrets_spec
+            if str(key).strip()
+        ] if isinstance(secrets_spec, list) else []
+
+        endpoints: List[Dict[str, str]] = []
+        if isinstance(endpoints_spec, list):
+            for endpoint in endpoints_spec:
+                if not isinstance(endpoint, dict):
+                    continue
+                endpoints.append(
+                    {
+                        "id": str(endpoint.get("id", "")).strip(),
+                        "label": str(endpoint.get("label", "")).strip(),
+                        "url": str(endpoint.get("url", "")).strip(),
+                    }
+                )
+
+        return {
+            "enabled": True,
+            "secrets": secrets_list,
+            "endpoints": endpoints,
+        }
+
+    def requires_return_delivery(self) -> bool:
+        spec = self.get_return_delivery_spec()
+        return bool(spec.get("enabled") and spec.get("secrets"))
     
     def destroy_ephemeral_secret(self, key: str) -> bool:
         """Destroy an ephemeral secret from memory.
