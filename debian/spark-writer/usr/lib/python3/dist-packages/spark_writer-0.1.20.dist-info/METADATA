@@ -1,9 +1,0 @@
-Metadata-Version: 2.4
-Name: spark-writer
-Version: 0.1.20
-Summary: GTK4 frontend for Spark Writer
-Author-email: "J. Weber" <weber.jesse@gmail.com>
-Requires-Python: >=3.10
-Requires-Dist: requests
-Requires-Dist: libtorrent
-Requires-Dist: pynacl
