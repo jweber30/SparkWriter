@@ -223,7 +223,7 @@ SparkWriter requires system packages (not pip):
 - `util-linux` (lsblk, wipefs, mount)
 - `python3-gi` (PyGObject bindings)
 
-On Ubuntu 24.04:
+On Crostini/debian:
 
 ```bash
 sudo apt install libgtk-4-1 libadwaita-1-0 libtorrent-rasterbar-dev \
