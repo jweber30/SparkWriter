@@ -133,7 +133,7 @@
     },
     "return_delivery": {
       "type": "object",
-      "description": "Post-write secure-context delivery contract for secrets and receipt context. Requires manifest version 1.4.",
+      "description": "Post-write secure-context delivery contract for secrets and receipt context. Introduced in manifest version 1.4 and available in supported manifest versions.",
       "properties": {
         "enabled": {
           "type": "boolean",

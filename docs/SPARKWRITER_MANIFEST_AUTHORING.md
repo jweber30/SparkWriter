@@ -340,15 +340,16 @@ Notes:
 - `when` conditions can skip an action
 - `output_var` stores an action result for later actions in the same phase
 - plugin-specific external commands must be declared in `requires.commands`
-- each declared command should include `name`, `description`, `install_hint`, and `allow_plugin_specific`
+- each declared command must include `name`, `description`, `install_hint`, and `allow_plugin_specific`
 - `prepare_installer_iso` uses `installer_scheme` plus generic `artifact_map` and `options`; scheme handlers interpret role names such as `user-data`, `meta-data`, `answer-file`, or `first-boot`
 
 For exact per-action fields, use the schema as the authoring source of truth.
 
 ## Return Delivery
 
-Manifest version `1.4` adds `return_delivery` for workflows that need to return
-ephemeral secrets or receipt context after a write.
+Manifest version `1.4` introduced `return_delivery` for workflows that need to
+return ephemeral secrets or receipt context after a write. It remains available
+in manifest version `"1.5"`, which new manifests should use.
 
 ```json
 {
@@ -368,7 +369,7 @@ ephemeral secrets or receipt context after a write.
 
 Current rules:
 
-- `return_delivery` requires manifest version `"1.4"`
+- `return_delivery` requires a supported manifest version; new manifests should use `"1.5"`
 - endpoint URLs must use HTTPS or localhost HTTP
 - secrets are named keys expected to be produced by the workflow and handled by the host UI
 
