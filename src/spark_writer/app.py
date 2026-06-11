@@ -21,6 +21,7 @@ from .plugins.signing import (
     verify_github_signed_manifest,
 )
 from .plugins.manifest_assets import discover_template_sidecars, resolve_sidecar_url
+from .plugins.manifest_schema import validate_manifest_schema
 from .plugins.trust import evaluate_trust
 
 class SparkApplication(Adw.Application):
@@ -159,6 +160,14 @@ class SparkApplication(Adw.Application):
                     + ", ".join(sorted(legacy_secure_keys))
                     + ". Secure manifest keys are deprecated; publish a plain manifest and reinstall it."
                 )
+
+            try:
+                validate_manifest_schema(manifest)
+            except ValueError as exc:
+                raise ValueError(
+                    "Manifest schema validation failed: "
+                    + str(exc)
+                ) from exc
             
             plugin_id = manifest.get('metadata', {}).get('id')
             plugin_name = manifest.get('metadata', {}).get('name', 'Unknown')

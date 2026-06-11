@@ -117,7 +117,7 @@ class JsonPluginApprovalMixin:
             )
 
     def _collect_phase_commands(self, actions: list[dict[str, Any]]) -> list[str]:
-        """Return unique executable names used by run_command actions in order."""
+        """Return unique executable names needed by a phase in order."""
 
         phase_commands: list[str] = []
         seen: set[str] = set()
@@ -135,8 +135,6 @@ class JsonPluginApprovalMixin:
             if command and isinstance(command[0], str):
                 return command[0]
             return None
-        if action_type == 'prepare_proxmox_auto_install_iso':
-            return self._PROXMOX_WRAPPER_COMMAND
         if (
             action_type == 'prepare_installer_iso'
             and str(action.get('installer_scheme', '')).strip() == 'proxmox-auto-install'

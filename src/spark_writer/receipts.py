@@ -61,6 +61,8 @@ def build_receipt_payload(
         source_section["version"] = source.version
     if source.acquire_kind:
         source_section["acquire"]["kind"] = source.acquire_kind
+    if source.acquire_artifact:
+        source_section["acquire"]["artifact"] = source.acquire_artifact
     if source.installer_scheme:
         source_section["installer_scheme"] = source.installer_scheme
     if source.capabilities:

@@ -12,8 +12,6 @@ logger = logging.getLogger(__name__)
 class PluginManager:
     _CONFLICTING_HOST_ACTION_TYPES = {
         "prepare_installer_iso",
-        "prepare_ubuntu_nocloud_iso",
-        "prepare_proxmox_auto_install_iso",
     }
 
     def __init__(self):

@@ -13,7 +13,7 @@ from spark_writer.plugins.signing import (
 
 def _base_manifest(username: str = "alice"):
     return {
-        "version": "1.0",
+        "version": "1.4",
         "metadata": {
             "id": "example-plugin",
             "name": "Example Plugin",

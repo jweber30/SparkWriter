@@ -23,6 +23,11 @@ from .base import PluginEventType, SparkPlug
 from .json_plugin_approvals import APPROVAL_MODEL_VERSION, JsonPluginApprovalMixin
 from .json_plugin_presets import JsonPluginPresetMixin
 from .json_plugin_templates import JsonPluginTemplateMixin
+from .manifest_schema import (
+    LOCKED_SCHEMA_VERSION,
+    SUPPORTED_SCHEMA_VERSIONS,
+    validate_manifest_schema,
+)
 from .template_engine import SparkTemplateEngine
 from . import installer_schemes
 
@@ -30,8 +35,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["APPROVAL_MODEL_VERSION", "JsonSparkPlug", "RuntimeApprovalRequiredError"]
 
-SUPPORTED_MANIFEST_VERSIONS = ("1.0", "1.4")
-RETURN_DELIVERY_MANIFEST_VERSION = "1.4"
+SUPPORTED_MANIFEST_VERSIONS = SUPPORTED_SCHEMA_VERSIONS
 
 
 class JsonSparkPlug(
@@ -60,8 +64,6 @@ class JsonSparkPlug(
         'show_ephemeral_secret_button',
         'create_artifact',
         'prepare_installer_iso',
-        'prepare_proxmox_auto_install_iso',
-        'prepare_ubuntu_nocloud_iso',
     }
     _RETIRED_ACTION_TYPES = {
         'write_file': "write_file is retired; use create_artifact plus a host-owned primitive instead.",
@@ -117,14 +119,6 @@ class JsonSparkPlug(
             )
             return
 
-        if self.manifest.get("return_delivery") and manifest_version != RETURN_DELIVERY_MANIFEST_VERSION:
-            self._available = False
-            self._unavailable_reason = (
-                "return_delivery requires manifest version "
-                f"{RETURN_DELIVERY_MANIFEST_VERSION}"
-            )
-            return
-
         if 'metadata' not in self.manifest or 'requires' not in self.manifest:
             self._available = False
             self._unavailable_reason = "Missing required manifest fields"
@@ -138,6 +132,13 @@ class JsonSparkPlug(
                 f"Unsupported manifest fields: {keys}. "
                 "Secure manifest keys are deprecated; publish a plain manifest and reinstall it."
             )
+            return
+
+        try:
+            validate_manifest_schema(self.manifest)
+        except ValueError as exc:
+            self._available = False
+            self._unavailable_reason = f"Manifest schema validation failed: {exc}"
             return
 
         # Validate all templates are syntactically valid
@@ -456,24 +457,10 @@ class JsonSparkPlug(
             build_approval_error=self._build_runtime_approval_error,
         )
 
-    def _handle_prepare_proxmox_auto_install_iso(
-        self, action: Dict[str, Any], context: Dict[str, Any]
-    ) -> Optional[str]:
-        return installer_schemes.prepare_proxmox_auto_install_iso(
-            self._exec_ctx, action, context, self._build_runtime_approval_error
-        )
-
     def _handle_prepare_installer_iso(
         self, action: Dict[str, Any], context: Dict[str, Any]
     ) -> Optional[str]:
         return installer_schemes.prepare_installer_iso(
-            self._exec_ctx, action, context, self._build_runtime_approval_error
-        )
-
-    def _handle_prepare_ubuntu_nocloud_iso(
-        self, action: Dict[str, Any], context: Dict[str, Any]
-    ) -> Optional[str]:
-        return installer_schemes.prepare_ubuntu_nocloud_iso(
             self._exec_ctx, action, context, self._build_runtime_approval_error
         )
 
@@ -828,8 +815,6 @@ class JsonSparkPlug(
             'show_ephemeral_secret_button': self._handle_show_ephemeral_secret_button,
             'create_artifact':            self._handle_create_artifact,
             'prepare_installer_iso':       self._handle_prepare_installer_iso,
-            'prepare_proxmox_auto_install_iso': self._handle_prepare_proxmox_auto_install_iso,
-            'prepare_ubuntu_nocloud_iso': self._handle_prepare_ubuntu_nocloud_iso,
         }
 
         handler = _dispatch.get(action_type)
@@ -1022,8 +1007,6 @@ class JsonSparkPlug(
     def get_declared_host_action_types(self) -> List[str]:
         host_owned = {
             "prepare_installer_iso",
-            "prepare_ubuntu_nocloud_iso",
-            "prepare_proxmox_auto_install_iso",
         }
         action_types: List[str] = []
         seen: set[str] = set()

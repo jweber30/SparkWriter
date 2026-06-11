@@ -25,6 +25,7 @@ from spark_writer.plugins.json_plugin import (
     JsonSparkPlug,
     RuntimeApprovalRequiredError,
 )
+from spark_writer.plugins.manifest_schema import validate_manifest_schema
 
 
 @pytest.fixture
@@ -37,9 +38,17 @@ def temp_plugin_dir(tmp_path):
 def make_manifest(plugin_id="test-plugin", commands=None, actions=None):
     if commands is None:
         commands = []
+    commands = [
+        {
+            "description": f"Run {command.get('name', 'command')}",
+            "install_hint": f"Install {command.get('name', 'command')}",
+            **command,
+        }
+        for command in commands
+    ]
 
     manifest = {
-        "version": "1.0",
+        "version": "1.4",
         "metadata": {
             "id": plugin_id,
             "name": "Test Plugin",
@@ -417,13 +426,75 @@ def test_schema_declares_manifest_version_1_4_and_return_delivery():
     with open(schema_path, "r", encoding="utf-8") as f:
         schema = json.load(f)
 
-    assert schema["properties"]["version"]["const"] == "1.4"
+    assert schema["properties"]["version"]["enum"] == ["1.4", "1.5"]
+    acquire = schema["definitions"]["source"]["properties"]["acquire"]
+    assert "artifact" in acquire["properties"]
     return_delivery = schema["properties"]["return_delivery"]
     assert "secrets" in return_delivery["properties"]
     assert "endpoints" in return_delivery["properties"]
     pattern = schema["definitions"]["return_endpoint"]["properties"]["url"]["pattern"]
     assert "https://" in pattern
     assert "localhost" in pattern
+
+
+def test_locked_manifest_version_runs_json_schema_validation():
+    manifest = {
+        "version": "1.4",
+        "metadata": {
+            "id": "schema-test",
+            "name": "Schema Test",
+        },
+        "requires": {
+            "commands": [
+                {
+                    "name": "mkpasswd",
+                    "description": "Generate password hashes",
+                    "install_hint": "apt install whois",
+                    "allow_plugin_specific": True,
+                }
+            ]
+        },
+        "source": {
+            "id": "ubuntu.24.04",
+            "name": "Ubuntu 24.04",
+            "family": "ubuntu",
+            "url": "https://example.com/ubuntu.iso",
+        },
+    }
+
+    validate_manifest_schema(manifest)
+
+
+def test_locked_manifest_version_rejects_schema_errors():
+    manifest = {
+        "version": "1.4",
+        "metadata": {
+            "id": "Bad_ID",
+            "name": "Bad ID",
+        },
+        "requires": {
+            "commands": [
+                {
+                    "name": "mkpasswd",
+                    "allow_plugin_specific": True,
+                }
+            ]
+        },
+    }
+
+    with pytest.raises(ValueError, match="metadata.id"):
+        validate_manifest_schema(manifest)
+
+
+def test_legacy_manifest_version_is_rejected(temp_plugin_dir):
+    manifest = make_manifest(plugin_id="legacy-version")
+    manifest["version"] = "1.0"
+    manifest_file = write_manifest(temp_plugin_dir, "legacy-version", manifest)
+
+    plugin = JsonSparkPlug(str(manifest_file))
+
+    assert plugin.is_available is False
+    assert "Unsupported manifest version: 1.0" in (plugin.unavailable_reason or "")
 
 
 def test_schema_declares_wizard_pages():

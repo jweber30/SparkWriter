@@ -2,7 +2,12 @@
 
 This is the concise author guide for the SparkWriter manifest format.
 
-If this document and the runtime disagree, trust the code, schema, and tests:
+Treat the JSON schema as the locked authoring contract. SparkWriter manifest
+version `"1.5"` is the current supported version. SparkWriter continues to
+load version `"1.4"` manifests for compatibility.
+
+If this document and the implementation disagree, check the schema, runtime, and
+tests:
 
 - `src/spark_writer/plugins/schema/sparkplug_manifest.schema.json`
 - `src/spark_writer/plugins/json_plugin.py`
@@ -30,7 +35,7 @@ flavor-specific form.
 
 ```json
 {
-  "version": "1.0",
+  "version": "1.5",
   "metadata": {
     "id": "example-manifest",
     "name": "Example Manifest"
@@ -43,10 +48,11 @@ flavor-specific form.
 
 Required rules:
 
-- `version` must be `"1.0"`
+- `version` must be `"1.5"` for new manifests; `"1.4"` remains supported for existing manifests
 - `metadata.id` must match `^[a-z0-9-]+$`
 - `metadata.name` is the display name
-- `requires.commands` may be empty, but `requires` must exist
+- `requires` must exist
+- `requires.commands` may be omitted or empty when the manifest declares no external commands
 
 Useful optional metadata:
 
@@ -71,6 +77,11 @@ SparkWriter currently supports two install paths:
 
 URL installs are snapshot installs. Reinstall to pick up remote changes.
 
+Install-time checks currently parse JSON, evaluate trust, verify GitHub-hosted
+signatures, reject retired secure-manifest keys, validate against the locked
+JSON Schema, check required command availability, and install referenced
+template sidecars.
+
 ## Source And Outputs
 
 New manifests should define one top-level `source`. This keeps flavor-specific
@@ -84,6 +95,10 @@ media data beside the form, templates, and actions that know how to use it.
     "family": "ubuntu",
     "version": "24.04",
     "url": "https://example.com/ubuntu.iso",
+    "acquire": {
+      "kind": "direct",
+      "url": "https://example.com/ubuntu.iso"
+    },
     "installer_scheme": "ubuntu-nocloud",
     "capabilities": ["cloud-init-nocloud"]
   },
@@ -96,10 +111,21 @@ media data beside the form, templates, and actions that know how to use it.
 
 `outputs.usb` controls whether the workflow can be written to a USB device.
 `outputs.iso` controls whether SparkWriter offers Save ISO for the workflow.
+`source.outputs` can override those output flags for a specific Source.
+
+`source.acquire` can describe how SparkWriter should fetch the image. Supported
+`kind` values are `direct`, `torrent`, and `magnet`. For torrent-backed Sources,
+version `1.5` adds `source.acquire.artifact`, a relative torrent payload path or
+filename that selects the ISO when the torrent contains multiple ISO files.
+SparkWriter automatically accepts torrents that contain one ISO plus checksum or
+signature sidecar files. If a torrent contains multiple ISO files and no
+`artifact` is provided, headless and GUI downloads fail with a clear error.
 
 ## Legacy Presets And Remote Feeds
 
-Manifests may still define install media through legacy fields:
+Presets are a legacy install-media path. New manifests should prefer `source`.
+SparkWriter still accepts these fields so older manifests and feeds continue to
+load:
 
 - `presets`
 - `preset_feeds`
@@ -228,6 +254,9 @@ Current behavior:
 - values are matched by `standard_field`, not by the manifest field ID
 - SparkWriter saves non-empty values when the user advances through wizard pages and when starting a flash/save flow
 
+Standard fields are the preferred way to connect manifest-local field IDs to
+host-owned profile data. They are independent of legacy preset IDs.
+
 ## Visibility Rules
 
 Use `ui_visibility.when` to control when a manifest is offered for the current Source.
@@ -269,6 +298,16 @@ Current template context includes:
 - `device_path`
 - `preset_id`
 - `preset_name`
+- `source_id`
+- `source_name`
+- `source_family`
+- `source_url`
+- `source_version`
+- `installer_scheme`
+- `source_capabilities`
+
+Legacy compatibility aliases may also appear in the context while older
+manifests are supported.
 
 Hyphenated field IDs can be referenced directly, such as `{{root-password}}`, and are also available through underscore aliases such as `{{root_password}}`.
 
@@ -301,9 +340,37 @@ Notes:
 - `when` conditions can skip an action
 - `output_var` stores an action result for later actions in the same phase
 - plugin-specific external commands must be declared in `requires.commands`
+- each declared command should include `name`, `description`, `install_hint`, and `allow_plugin_specific`
 - `prepare_installer_iso` uses `installer_scheme` plus generic `artifact_map` and `options`; scheme handlers interpret role names such as `user-data`, `meta-data`, `answer-file`, or `first-boot`
 
-For exact per-action fields, use the schema and runtime as the source of truth.
+For exact per-action fields, use the schema as the authoring source of truth.
+
+## Return Delivery
+
+Manifest version `1.4` adds `return_delivery` for workflows that need to return
+ephemeral secrets or receipt context after a write.
+
+```json
+{
+  "return_delivery": {
+    "enabled": true,
+    "secrets": ["admin_password"],
+    "endpoints": [
+      {
+        "id": "ops-api",
+        "label": "Operations API",
+        "url": "https://example.com/sparkwriter/return"
+      }
+    ]
+  }
+}
+```
+
+Current rules:
+
+- `return_delivery` requires manifest version `"1.4"`
+- endpoint URLs must use HTTPS or localhost HTTP
+- secrets are named keys expected to be produced by the workflow and handled by the host UI
 
 ## Trust And Distribution
 
@@ -312,8 +379,9 @@ Current install-time trust behavior:
 - local paths and `file://` manifests are trusted
 - `localhost` manifests are allowed with confirmation
 - plain `http://` manifests are blocked by default
-- non-GitHub `https://` manifests require confirmation
+- unknown `https://` manifests require confirmation
 - GitHub-hosted manifests require identity and signature verification
+- selected distribution hosts may be auto-trusted by the application
 
 GitHub-hosted currently includes:
 
@@ -322,11 +390,21 @@ GitHub-hosted currently includes:
 - `gist.githubusercontent.com`
 - `*.github.io`
 
+Auto-trusted distribution hosts currently include:
+
+- `raw.githubusercontent.com`
+- `gist.githubusercontent.com`
+- `*.github.io`
+- `gitlab.com`
+
 If you publish a GitHub-hosted manifest, include:
 
 - `metadata.github_username`
 - `metadata.signature.openssh`
 - `metadata.signature.algorithm` set to `openssh-ssh-ed25519`
+
+Auto-trust only skips the first source-confirmation prompt. GitHub-hosted
+manifests must still pass identity and signature verification.
 
 ## A Good Authoring Pattern
 

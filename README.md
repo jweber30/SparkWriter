@@ -42,9 +42,9 @@ External authors should use `docs/SPARKWRITER_MANIFEST_AUTHORING.md` for the cur
 ### Publisher Quickstart (2 Minutes)
 
 1. Create `my-plugin.json` with:
-    - `version: "1.0"`
+    - `version: "1.5"`
     - `metadata.id`, `metadata.name`
-    - `requires.commands` (empty array if none)
+    - `requires` (use `"commands": []` if you want to be explicit that no external commands are needed)
 2. Add one top-level `source` and optional `outputs`.
 3. Host the manifest at an HTTPS URL.
 4. Install it locally to test:
@@ -70,7 +70,7 @@ That document covers:
 
 - manifest shape and required fields
 - trust, GitHub signing, and install-time behavior
-- manifest-owned Sources, legacy presets, remote feeds, and torrent support
+- manifest-owned Sources, legacy preset compatibility, remote feeds, and torrent support
 - config fields, visibility rules, and template behavior
 - lifecycle phases, action semantics, approvals, artifacts, and retired actions
 
@@ -85,7 +85,12 @@ When a user clicks a `spark://plugin/add?manifest=...` link in their browser:
 1. The browser recognizes the `spark://` scheme (registered by the `.desktop` file)
 2. The system launches SparkWriter with the full URI as an argument
 3. SparkWriter parses the URI, evaluates trust, and prompts the user before downloading
-4. The manifest is downloaded, validated, and installed locally
+4. The manifest is downloaded, checked, and installed locally
+
+Current install-time checks include JSON parsing, trust evaluation, GitHub
+signature verification for GitHub-hosted manifests, legacy secure-key rejection,
+JSON Schema validation, required command availability checks, and template
+sidecar installation.
 
 This works on:
 - Desktop Linux (GTK4 environments)
@@ -147,6 +152,13 @@ Then restart Spark Writer. JSON files in that directory are loaded automatically
 
 Declare external commands under `requires.commands`.
 
+Each command declaration should include:
+
+- `name`
+- `description`
+- `install_hint`
+- `allow_plugin_specific`
+
 Current behavior:
 
 - Missing commands block plugin availability.
@@ -194,7 +206,7 @@ JsonSparkPlug loads manifest
     ↓
 ConfigFormBuilder renders config_fields as Adwaita widgets
     ↓
-User fills form + selects preset/device
+User fills form + selects Source/device
     ↓
 on_iso_ready actions (if any) + on_write_complete actions
     ↓

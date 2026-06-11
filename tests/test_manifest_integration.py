@@ -27,7 +27,7 @@ class TestProxmoxManifestIntegration:
         # Just verify the manifest loaded correctly
         assert proxmox_plugin.name == "Proxmox Tailscale"
         assert "proxmox-tailscale" in proxmox_plugin.manifest["metadata"]["id"]
-        assert proxmox_plugin.manifest["version"] == "1.0"
+        assert proxmox_plugin.manifest["version"] == "1.4"
 
     def test_proxmox_manifest_has_expected_presets(self, proxmox_plugin):
         """Verify presets are registered."""
@@ -328,7 +328,7 @@ class TestUbuntuLivePersistenceManifestIntegration:
     def test_manifest_loads_successfully(self, ubuntu_live_persistence_plugin):
         assert ubuntu_live_persistence_plugin.name == "Ubuntu Live Persistence"
         assert ubuntu_live_persistence_plugin.manifest["metadata"]["id"] == "ubuntu-live-persistence"
-        assert ubuntu_live_persistence_plugin.manifest["version"] == "1.0"
+        assert ubuntu_live_persistence_plugin.manifest["version"] == "1.4"
 
     def test_manifest_is_post_write_only(self, ubuntu_live_persistence_plugin):
         assert ubuntu_live_persistence_plugin.requires_processing() is False
@@ -387,7 +387,7 @@ class TestUbuntuAutoinstallManifestIntegration:
     def test_manifest_loads_successfully(self, ubuntu_autoinstall_plugin):
         assert ubuntu_autoinstall_plugin.name == "Ubuntu Autoinstall"
         assert ubuntu_autoinstall_plugin.manifest["metadata"]["id"] == "ubuntu-autoinstall"
-        assert ubuntu_autoinstall_plugin.manifest["version"] == "1.0"
+        assert ubuntu_autoinstall_plugin.manifest["version"] == "1.4"
 
     def test_manifest_uses_host_owned_nocloud_wrapper(self, ubuntu_autoinstall_manifest):
         actions = ubuntu_autoinstall_manifest["actions"]["on_iso_ready"]
@@ -529,7 +529,7 @@ class TestManifestLoadingFromDisk:
         """Verify the manifest follows the schema."""
         # Check required top-level fields
         assert "version" in proxmox_manifest
-        assert proxmox_manifest["version"] == "1.0"
+        assert proxmox_manifest["version"] == "1.4"
         
         assert "metadata" in proxmox_manifest
         assert proxmox_manifest["metadata"].get("id")
@@ -544,7 +544,7 @@ class TestManifestLoadingFromDisk:
         assert "signature" not in proxmox_manifest
 
     def test_ubuntu_live_persistence_manifest_has_expected_shape(self, ubuntu_live_persistence_manifest):
-        assert ubuntu_live_persistence_manifest["version"] == "1.0"
+        assert ubuntu_live_persistence_manifest["version"] == "1.4"
         assert ubuntu_live_persistence_manifest["metadata"]["id"] == "ubuntu-live-persistence"
         assert ubuntu_live_persistence_manifest["requires"]["commands"] == []
         assert ubuntu_live_persistence_manifest.get("config_fields", []) == []
@@ -623,7 +623,7 @@ class TestArtifactValidation:
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
         manifest = tmp_path / "retired.json"
         manifest.write_text(
-            '{"version":"1.0","metadata":{"id":"retired","name":"Retired"},'
+            '{"version":"1.4","metadata":{"id":"retired","name":"Retired"},'
             '"requires":{"commands":[]},"actions":{"on_iso_ready":['
             '{"id":"legacy","type":"write_file","content":"x","path":"/tmp/x"}]}}',
             encoding="utf-8",
@@ -631,4 +631,4 @@ class TestArtifactValidation:
 
         plugin = JsonSparkPlug(str(manifest))
         assert plugin.is_available is False
-        assert "write_file is retired" in (plugin.unavailable_reason or "")
+        assert "Manifest schema validation failed" in (plugin.unavailable_reason or "")

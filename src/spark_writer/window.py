@@ -780,6 +780,8 @@ class SparkWindow(Adw.ApplicationWindow):
             self._on_background_download_progress,
             self._on_background_download_complete,
             self._on_background_download_error,
+            acquire_kind=source.acquire_kind,
+            artifact=source.acquire_artifact,
         )
 
     def _pause_background_download(self, reason: str) -> None:
@@ -885,6 +887,8 @@ class SparkWindow(Adw.ApplicationWindow):
             self._on_progress,
             on_complete,
             self._on_error,
+            acquire_kind=source.acquire_kind,
+            artifact=source.acquire_artifact,
         )
 
     def _on_flash_clicked(self, btn):

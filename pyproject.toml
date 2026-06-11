@@ -8,6 +8,7 @@ version = "0.1.20"
 description = "GTK4 frontend for Spark Writer"
 authors = [{name = "J. Weber", email = "weber.jesse@gmail.com"}]
 dependencies = [
+    "jsonschema",
     "requests",
     "libtorrent",
     "pynacl",
@@ -15,7 +16,7 @@ dependencies = [
 requires-python = ">=3.10"
 
 [project.scripts]
-spark-writer = "spark_writer.app:main"
+spark-writer = "spark_writer.entrypoint:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

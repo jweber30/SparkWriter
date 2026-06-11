@@ -24,6 +24,7 @@ class Source:
     version: Optional[str] = None
     sha256: str = ""
     acquire_kind: Optional[str] = None
+    acquire_artifact: Optional[str] = None
     installer_scheme: Optional[str] = None
     capabilities: List[str] = field(default_factory=list)
     sparkplug_id: Optional[str] = None
@@ -41,6 +42,7 @@ class Source:
 
         acquire = raw.get("acquire", {})
         acquire_kind = str(acquire.get("kind", "")).strip() or None
+        acquire_artifact = str(acquire.get("artifact", "")).strip() or None
         installer_scheme = str(raw.get("installer_scheme", "")).strip() or None
         sparkplug_id = str(raw.get("sparkplug_id", "")).strip() or None
 
@@ -70,6 +72,7 @@ class Source:
             version=version,
             sha256=sha256,
             acquire_kind=acquire_kind,
+            acquire_artifact=acquire_artifact,
             installer_scheme=installer_scheme,
             capabilities=capabilities,
             sparkplug_id=sparkplug_id,
@@ -104,6 +107,9 @@ class Source:
         if self.acquire_kind:
             payload["acquire"] = {"url": self.url, "kind": self.acquire_kind}
             payload["source_acquire_kind"] = self.acquire_kind
+            if self.acquire_artifact:
+                payload["acquire"]["artifact"] = self.acquire_artifact
+                payload["source_acquire_artifact"] = self.acquire_artifact
         if self.installer_scheme:
             payload["installer_scheme"] = self.installer_scheme
         return payload
