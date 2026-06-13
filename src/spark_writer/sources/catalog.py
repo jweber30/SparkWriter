@@ -1,9 +1,4 @@
-"""Installation Source normalization.
-
-The active SparkWriter catalog is the installed manifest set. This module keeps
-the small runtime Source value object and a legacy JSON catalog loader used by
-older tests/tools.
-"""
+"""Installation Source normalization and local manifest discovery."""
 
 from __future__ import annotations
 
@@ -116,22 +111,76 @@ class Source:
 
 
 class SourceCatalog:
-    """Load host-owned Source records from built-in JSON."""
+    """Load Sources from the locally installed manifest directory."""
 
-    def __init__(self, catalog_path: Optional[Path] = None) -> None:
-        self._catalog_path = catalog_path or Path(__file__).with_name("catalog.json")
+    def __init__(self, installed_dir: Optional[Path] = None) -> None:
+        self._installed_dir = installed_dir or (
+            Path(__file__).resolve().parents[1] / "plugins" / "installed"
+        )
 
     def list_sources(self) -> List[Source]:
-        if not self._catalog_path.exists():
+        if not self._installed_dir.is_dir():
             return []
 
-        with self._catalog_path.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
+        sources: List[Source] = []
+        for manifest_path in sorted(self._installed_dir.glob("*.json")):
+            with manifest_path.open("r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
 
-        if isinstance(payload, dict):
-            records = payload.get("sources", [])
-        else:
-            records = payload
+            if not isinstance(manifest, dict):
+                continue
 
-        sources = [Source.from_dict(record) for record in records]
+            records = self._manifest_sources(manifest)
+            sources.extend(Source.from_dict(record) for record in records)
+
         return sorted(sources, key=lambda source: (source.name.lower(), source.id))
+
+    @staticmethod
+    def _manifest_sources(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
+        metadata = manifest.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        owner_id = str(metadata.get("id") or metadata.get("name") or "").strip()
+
+        outputs = manifest.get("outputs", {})
+        if not isinstance(outputs, dict):
+            outputs = {}
+
+        source = manifest.get("source")
+        if isinstance(source, dict) and source.get("id"):
+            normalized = dict(source)
+            normalized.setdefault("sparkplug_id", owner_id)
+            normalized.setdefault("outputs", outputs)
+            return [normalized]
+
+        records: List[Dict[str, Any]] = []
+        presets = manifest.get("presets", [])
+        if not isinstance(presets, list):
+            return records
+
+        for preset in presets:
+            if not isinstance(preset, dict) or not preset.get("id"):
+                continue
+
+            preset_metadata = preset.get("metadata", {})
+            if not isinstance(preset_metadata, dict):
+                preset_metadata = {}
+
+            records.append(
+                {
+                    "id": preset["id"],
+                    "name": preset.get("name", preset["id"]),
+                    "url": preset.get("url", ""),
+                    "family": preset.get("family") or preset.get("distro", ""),
+                    "version": preset.get("version", ""),
+                    "sha256": preset.get("sha256", ""),
+                    "installer_scheme": preset.get("installer_scheme")
+                    or preset_metadata.get("installer_scheme", ""),
+                    "capabilities": preset.get("capabilities")
+                    or preset_metadata.get("capabilities", []),
+                    "sparkplug_id": owner_id,
+                    "outputs": outputs,
+                }
+            )
+
+        return records

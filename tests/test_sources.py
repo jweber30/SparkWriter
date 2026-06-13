@@ -15,41 +15,50 @@ from spark_writer.receipts import build_receipt_payload
 from spark_writer.sources import Source, SourceCatalog
 
 
-def test_source_catalog_without_json_is_empty():
-    catalog = SourceCatalog()
+def test_source_catalog_missing_installed_directory_is_empty(tmp_path):
+    catalog = SourceCatalog(tmp_path / "missing")
     assert catalog.list_sources() == []
 
 
-def test_source_catalog_normalizes_catalog_shape(tmp_path):
-    catalog_path = tmp_path / "sources.json"
-    catalog_path.write_text(
+def test_source_catalog_loads_installed_manifest_directory(tmp_path):
+    installed_dir = tmp_path / "installed"
+    installed_dir.mkdir()
+    manifest_path = installed_dir / "demo.json"
+    manifest_path.write_text(
         json.dumps(
             {
-                "sources": [
-                    {
-                        "id": "demo-source",
-                        "name": "Demo Source",
-                        "family": "ubuntu",
-                        "url": "https://example.com/demo.iso",
-                        "acquire": {"kind": "direct", "artifact": "demo.iso"},
-                        "installer_scheme": "ubuntu-nocloud",
-                        "capabilities": ["cloud-init-nocloud"],
-                    }
-                ]
+                "metadata": {"id": "demo-plugin", "name": "Demo Plugin"},
+                "source": {
+                    "id": "demo-source",
+                    "name": "Demo Source",
+                    "family": "ubuntu",
+                    "url": "https://example.com/demo.iso",
+                    "acquire": {"kind": "direct", "artifact": "demo.iso"},
+                    "installer_scheme": "ubuntu-nocloud",
+                    "capabilities": ["cloud-init-nocloud"],
+                },
+                "outputs": {"usb": True, "iso": False},
             }
         ),
         encoding="utf-8",
     )
 
-    source = SourceCatalog(catalog_path).list_sources()[0]
+    source = SourceCatalog(installed_dir).list_sources()[0]
     assert source.id == "demo-source"
+    assert source.sparkplug_id == "demo-plugin"
     assert source.acquire_kind == "direct"
     assert source.acquire_artifact == "demo.iso"
     assert source.installer_scheme == "ubuntu-nocloud"
     assert source.to_dict()["source_family"] == "ubuntu"
     assert source.to_dict()["source_acquire_artifact"] == "demo.iso"
     assert source.can_write_usb is True
-    assert source.can_export_iso is True
+    assert source.can_export_iso is False
+
+
+def test_source_catalog_defaults_to_packaged_installed_directory():
+    source_ids = {source.id for source in SourceCatalog().list_sources()}
+
+    assert "ubuntu-24.04-server-autoinstall" in source_ids
 
 
 def test_plugin_manager_collects_manifest_owned_sources(tmp_path):

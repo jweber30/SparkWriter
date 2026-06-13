@@ -1,3 +1,15 @@
+spark-writer (0.1.22-1) unstable; urgency=medium
+
+  * Automated patch version bump via scripts/build-deb.sh.
+
+ -- J. Weber <weber.jesse@gmail.com>  Fri, 12 Jun 2026 17:10:45 -0600
+
+spark-writer (0.1.21-1) unstable; urgency=medium
+
+  * Automated patch version bump via scripts/build-deb.sh.
+
+ -- J. Weber <weber.jesse@gmail.com>  Fri, 12 Jun 2026 17:10:36 -0600
+
 spark-writer (0.1.20-1) unstable; urgency=medium
 
   * Automated patch version bump via scripts/build-deb.sh.

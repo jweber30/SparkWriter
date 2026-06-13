@@ -21,6 +21,7 @@ from .plugins.signing import (
     verify_github_signed_manifest,
 )
 from .plugins.manifest_assets import discover_template_sidecars, resolve_sidecar_url
+from .plugins.manifest_download import parse_downloaded_manifest
 from .plugins.manifest_schema import validate_manifest_schema
 from .plugins.trust import evaluate_trust
 
@@ -119,10 +120,8 @@ class SparkApplication(Adw.Application):
     
     def _download_and_install_plugin(self, url: str, github_token: str | None = None):
         """Download and install plugin after trust confirmation."""
-        import json
         import urllib.error
         import urllib.request
-        from pathlib import Path
         tmp_path = None
         try:
             normalized_url = normalize_github_manifest_url(url)
@@ -134,12 +133,14 @@ class SparkApplication(Adw.Application):
                 request = build_manifest_download_request(normalized_url, github_token)
                 with urllib.request.urlopen(request, timeout=30) as response:
                     content = response.read()
+                    manifest = parse_downloaded_manifest(
+                        content,
+                        content_type=response.headers.get("Content-Type"),
+                        final_url=response.geturl(),
+                    )
                     tmp.write(content)
-            
-            # Step 4: Parse and validate manifest
-            with open(tmp_path, 'r', encoding='utf-8') as f:
-                manifest = json.load(f)
 
+            # Step 4: Validate manifest
             # TODO(next sprint): Validate manifest config_fields.pattern regex strings
             # during install-time checks. For now, publishers must self-test patterns.
 
