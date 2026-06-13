@@ -3,8 +3,7 @@
 This is the concise author guide for the SparkWriter manifest format.
 
 Treat the JSON schema as the locked authoring contract. SparkWriter manifest
-version `"1.5"` is the current supported version. SparkWriter continues to
-load version `"1.4"` manifests for compatibility.
+version `"1.6"` is the current supported version.
 
 If this document and the implementation disagree, check the schema, runtime, and
 tests:
@@ -35,7 +34,7 @@ flavor-specific form.
 
 ```json
 {
-  "version": "1.5",
+  "version": "1.6",
   "metadata": {
     "id": "example-manifest",
     "name": "Example Manifest"
@@ -48,7 +47,7 @@ flavor-specific form.
 
 Required rules:
 
-- `version` must be `"1.5"` for new manifests; `"1.4"` remains supported for existing manifests
+- `version` must be `"1.6"`
 - `metadata.id` must match `^[a-z0-9-]+$`
 - `metadata.name` is the display name
 - `requires` must exist
@@ -115,7 +114,7 @@ media data beside the form, templates, and actions that know how to use it.
 
 `source.acquire` can describe how SparkWriter should fetch the image. Supported
 `kind` values are `direct`, `torrent`, and `magnet`. For torrent-backed Sources,
-version `1.5` adds `source.acquire.artifact`, a relative torrent payload path or
+`source.acquire.artifact` is a relative torrent payload path or
 filename that selects the ISO when the torrent contains multiple ISO files.
 SparkWriter automatically accepts torrents that contain one ISO plus checksum or
 signature sidecar files. If a torrent contains multiple ISO files and no
@@ -325,13 +324,13 @@ Currently supported action types:
 - `compute_file_hash`
 - `create_partition`
 - `write_partition_files`
-- `generate_receipt`
 - `format_yaml_list`
 - `generate_ephemeral_password`
 - `store_ephemeral_secret`
 - `show_ephemeral_secret_button`
 - `create_artifact`
 - `prepare_installer_iso`
+- `run_builder`
 
 Notes:
 
@@ -342,14 +341,47 @@ Notes:
 - plugin-specific external commands must be declared in `requires.commands`
 - each declared command must include `name`, `description`, `install_hint`, and `allow_plugin_specific`
 - `prepare_installer_iso` uses `installer_scheme` plus generic `artifact_map` and `options`; scheme handlers interpret role names such as `user-data`, `meta-data`, `answer-file`, or `first-boot`
+- manifest version `1.6` Proxmox workflows must use `run_builder`; direct host-side Proxmox preparation is rejected
+
+### OCI Builders
+
+`run_builder` executes an OCI image with Podman preferred and Docker as a
+fallback. The manifest supplies a builder protocol ID and image reference, not
+an arbitrary command:
+
+```json
+{
+  "id": "build_installer",
+  "type": "run_builder",
+  "builder_id": "proxmox-auto-install",
+  "image": "spark-writer/proxmox-auto-install:trixie-v2",
+  "source_path": "{{iso_path}}",
+  "artifact_map": {
+    "answer-file": "answer_toml",
+    "first-boot": "firstboot_script"
+  },
+  "network": false
+}
+```
+
+SparkWriter resolves the image to a digest and records approval for the
+manifest, image, digest, and network policy. A tag that later resolves to new
+bytes requires approval again. Builders receive `/inputs/request.json`,
+read-only input files, and a writable `/artifacts` directory. They must emit
+`/artifacts/result.json` with `resultVersion` `"1"`, a direct artifact path,
+SHA-256, ISO media type, builder ID, and builder version. SparkWriter validates
+the closed result schema and independently hashes the artifact.
+
+Builders run with a read-only root filesystem, no capabilities, no devices or
+host sockets, and no network unless `network` is explicitly enabled and
+approved.
 
 For exact per-action fields, use the schema as the authoring source of truth.
 
 ## Return Delivery
 
-Manifest version `1.4` introduced `return_delivery` for workflows that need to
-return ephemeral secrets or receipt context after a write. It remains available
-in manifest version `"1.5"`, which new manifests should use.
+Manifest version `1.6` supports `return_delivery` for workflows that need to
+return ephemeral secrets or receipt context after a write.
 
 ```json
 {
@@ -369,7 +401,7 @@ in manifest version `"1.5"`, which new manifests should use.
 
 Current rules:
 
-- `return_delivery` requires a supported manifest version; new manifests should use `"1.5"`
+- `return_delivery` requires manifest version `"1.6"`
 - endpoint URLs must use HTTPS or localhost HTTP
 - secrets are named keys expected to be produced by the workflow and handled by the host UI
 

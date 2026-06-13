@@ -13,7 +13,7 @@ def _write_manifest(tmp_path: Path, *, fields=None, actions=None, requires=None)
     iso = tmp_path / "source.iso"
     iso.write_bytes(b"iso")
     manifest = {
-        "version": "1.4",
+        "version": "1.6",
         "metadata": {
             "id": "cli-test",
             "name": "CLI Test",
@@ -62,7 +62,11 @@ def test_write_uses_manifest_defaults(monkeypatch, tmp_path):
         )
     )
 
-    assert writes == [(tmp_path / "source.iso", "/dev/test")]
+    assert len(writes) == 1
+    image, target = writes[0]
+    assert image.path == (tmp_path / "source.iso").resolve()
+    assert image.sha256
+    assert target == "/dev/test"
 
 
 def test_write_rejects_manifest_fields_without_defaults(monkeypatch, tmp_path):

@@ -7,6 +7,7 @@ This test suite validates the integration seams:
 - Crostini detection branches correctly
 """
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -30,6 +31,7 @@ from usb_writer_core.writer import (
     PartitionNotFoundError,
 )
 from usb_writer_core.notifications.crostini import is_running_in_crostini
+from usb_writer_core.models import VerifiedImage
 
 
 # ============================================================================
@@ -50,6 +52,17 @@ def temp_device_path(tmp_path):
     device = tmp_path / "sdb"
     device.write_bytes(b"")  # Empty file to represent device
     return str(device)
+
+
+def verified_image(path: Path) -> VerifiedImage:
+    content = path.read_bytes()
+    return VerifiedImage(
+        path=path,
+        sha256=hashlib.sha256(content).hexdigest(),
+        size_bytes=len(content),
+        media_type="application/x-iso9660-image",
+        provenance="test",
+    )
 
 
 # ============================================================================
@@ -153,14 +166,15 @@ def test_write_iso_calls_dd_with_correct_args(
     mock_process.stderr = mock_stderr
     mock_popen.return_value = mock_process
     
-    write_iso_to_device(temp_iso_file, "/dev/sdb")
+    with patch("shutil.which", return_value="/usr/bin/tool"):
+        write_iso_to_device(verified_image(temp_iso_file), "/dev/sdb")
     
     # Verify dd was called
     mock_popen.assert_called_once()
     cmd = mock_popen.call_args[0][0]
     
     assert cmd[0] == "dd"
-    assert f"if={temp_iso_file}" in cmd
+    assert any(part.startswith("if=/proc/self/fd/") for part in cmd)
     assert "of=/dev/sdb" in cmd
     assert "oflag=sync" in cmd
     assert "status=progress" in cmd
@@ -203,7 +217,11 @@ def test_write_iso_triggers_progress_callback(
     def capture_progress(bytes_written, total):
         progress_values.append((bytes_written, total))
     
-    write_iso_to_device(temp_iso_file, "/dev/sdb", progress_callback=capture_progress)
+    write_iso_to_device(
+        verified_image(temp_iso_file),
+        "/dev/sdb",
+        progress_callback=capture_progress,
+    )
     
     # Verify progress callback was called with correct bytes
     assert len(progress_values) == 2
@@ -219,12 +237,19 @@ def test_write_iso_raises_on_missing_iso(
     mock_stat, mock_exists, mock_popen, mock_run
 ):
     """Verify error if ISO file doesn't exist."""
-    mock_exists.side_effect = [False, True]  # ISO missing, device exists
+    mock_exists.return_value = True
+    image = VerifiedImage(
+        path=Path("/tmp/missing.iso"),
+        sha256="0" * 64,
+        size_bytes=1,
+        media_type="application/x-iso9660-image",
+        provenance="test",
+    )
     
     with pytest.raises(USBWriteError) as exc_info:
-        write_iso_to_device(Path("/tmp/missing.iso"), "/dev/sdb")
+        write_iso_to_device(image, "/dev/sdb")
     
-    assert "not found" in str(exc_info.value).lower()
+    assert "unable to open" in str(exc_info.value).lower()
 
 
 @patch("subprocess.run")
@@ -232,13 +257,13 @@ def test_write_iso_raises_on_missing_iso(
 @patch("pathlib.Path.exists")
 @patch("pathlib.Path.stat")
 def test_write_iso_raises_on_missing_device(
-    mock_stat, mock_exists, mock_popen, mock_run
+    mock_stat, mock_exists, mock_popen, mock_run, temp_iso_file
 ):
     """Verify error if device doesn't exist."""
-    mock_exists.side_effect = [True, False]  # ISO exists, device missing
+    mock_exists.return_value = False
     
     with pytest.raises(USBWriteError) as exc_info:
-        write_iso_to_device(Path("/tmp/test.iso"), "/dev/missing")
+        write_iso_to_device(verified_image(temp_iso_file), "/dev/missing")
     
     assert "not found" in str(exc_info.value).lower()
 
@@ -261,7 +286,8 @@ def test_write_iso_calls_wipe_device_first(
     mock_process.stderr = mock_stderr
     mock_popen.return_value = mock_process
     
-    write_iso_to_device(temp_iso_file, "/dev/sdb")
+    with patch("shutil.which", return_value="/usr/bin/tool"):
+        write_iso_to_device(verified_image(temp_iso_file), "/dev/sdb")
     
     # Verify wipefs and sgdisk were called
     calls = mock_run.call_args_list
@@ -333,16 +359,22 @@ def test_create_aux_partition_raises_on_sgdisk_failure(mock_run):
 @patch("subprocess.run")
 @patch("os.path.exists")
 @patch("time.sleep")
-def test_find_partition_by_label_parses_sgdisk_output(
+def test_find_partition_by_label_parses_lsblk_output(
     mock_sleep, mock_exists, mock_run
 ):
     """Verify partition is found and path is returned."""
-    sgdisk_output = """Number  Start (sector)    End (sector)  Size       Code  Name
-   1            2048        999423  488 MiB     EF00  
-   2          999424       2000000  488 MiB     0700  CIDATA
-"""
-    
-    mock_run.return_value = MagicMock(returncode=0, stdout=sgdisk_output)
+    lsblk_output = json.dumps(
+        {
+            "blockdevices": [
+                {
+                    "name": "sdb",
+                    "partlabel": None,
+                    "children": [{"name": "sdb2", "partlabel": "CIDATA"}],
+                }
+            ]
+        }
+    )
+    mock_run.return_value = MagicMock(returncode=0, stdout=lsblk_output)
     mock_exists.return_value = True
     
     partition_path = find_partition_by_label("/dev/sdb", "CIDATA")
@@ -357,15 +389,26 @@ def test_find_partition_by_label_retries_on_not_found(
     mock_sleep, mock_exists, mock_run
 ):
     """Verify retry logic if partition not immediately found."""
-    sgdisk_output = """Number  Start (sector)    End (sector)  Size       Code  Name
-   1            2048        999423  488 MiB     EF00  
-"""
+    missing_output = json.dumps(
+        {"blockdevices": [{"name": "sdb", "partlabel": None, "children": []}]}
+    )
+    found_output = json.dumps(
+        {
+            "blockdevices": [
+                {
+                    "name": "sdb",
+                    "partlabel": None,
+                    "children": [{"name": "sdb2", "partlabel": "CIDATA"}],
+                }
+            ]
+        }
+    )
     
     # First few calls don't have partition, then succeed
     mock_run.side_effect = [
-        MagicMock(returncode=0, stdout=sgdisk_output),
-        MagicMock(returncode=0, stdout=sgdisk_output),
-        MagicMock(returncode=0, stdout=sgdisk_output + "   2          999424       2000000  488 MiB     0700  CIDATA\n"),
+        MagicMock(returncode=0, stdout=missing_output),
+        MagicMock(returncode=0, stdout=missing_output),
+        MagicMock(returncode=0, stdout=found_output),
     ]
     
     mock_exists.return_value = True
@@ -396,9 +439,11 @@ def test_find_partition_by_label_raises_if_not_found(
 # Tests: wipe_device
 # ============================================================================
 
+@patch("shutil.which")
 @patch("subprocess.run")
-def test_wipe_device_calls_wipefs_and_sgdisk(mock_run):
+def test_wipe_device_calls_wipefs_and_sgdisk(mock_run, mock_which):
     """Verify wipe_device calls correct commands in order."""
+    mock_which.return_value = "/usr/bin/tool"
     mock_run.return_value = MagicMock(returncode=0)
     
     wipe_device("/dev/sdb")
@@ -414,14 +459,38 @@ def test_wipe_device_calls_wipefs_and_sgdisk(mock_run):
     assert "-Z" in calls[1][0][0]
 
 
+@patch("shutil.which")
 @patch("subprocess.run")
-def test_wipe_device_continues_on_error(mock_run):
+def test_wipe_device_continues_on_error(mock_run, mock_which):
     """Verify wipe_device doesn't raise on error (logs warning instead)."""
+    mock_which.return_value = "/usr/bin/tool"
     # First wipefs fails
     mock_run.side_effect = Exception("wipefs failed")
     
     # Should not raise
     wipe_device("/dev/sdb")
+
+
+@patch("shutil.which")
+@patch("subprocess.run")
+def test_wipe_device_skips_missing_command_and_continues(mock_run, mock_which):
+    """Verify missing wipefs is skipped and later wipe steps still run."""
+
+    def which_side_effect(binary):
+        if binary == "wipefs":
+            return None
+        return f"/usr/bin/{binary}"
+
+    mock_which.side_effect = which_side_effect
+    mock_run.return_value = MagicMock(returncode=0)
+
+    wipe_device("/dev/sdb")
+
+    command_names = [call_args[0][0][0] for call_args in mock_run.call_args_list]
+    assert "wipefs" not in command_names
+    assert "sgdisk" in command_names
+    assert "partprobe" in command_names
+    assert "udevadm" in command_names
 
 
 # ============================================================================
@@ -470,7 +539,8 @@ def test_full_write_flow_subprocess_sequence(
     mock_process.stderr = mock_stderr
     mock_popen.return_value = mock_process
     
-    write_iso_to_device(temp_iso_file, "/dev/sdb")
+    with patch("shutil.which", return_value="/usr/bin/tool"):
+        write_iso_to_device(verified_image(temp_iso_file), "/dev/sdb")
     
     # Verify call sequence
     calls = mock_run.call_args_list

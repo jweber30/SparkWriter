@@ -6,6 +6,7 @@ This test suite exercises the full SparkWriter flow:
 3. Execute the manifest workflow
 """
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -17,6 +18,8 @@ SRC_ROOT = PACKAGE_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+from spark_writer.plugins.json_plugin import JsonSparkPlug
+
 
 class TestProxmoxManifestIntegration:
     """Integration tests using the Proxmox Tailscale manifest."""
@@ -27,7 +30,7 @@ class TestProxmoxManifestIntegration:
         # Just verify the manifest loaded correctly
         assert proxmox_plugin.name == "Proxmox Tailscale"
         assert "proxmox-tailscale" in proxmox_plugin.manifest["metadata"]["id"]
-        assert proxmox_plugin.manifest["version"] == "1.4"
+        assert proxmox_plugin.manifest["version"] == "1.6"
 
     def test_proxmox_manifest_has_expected_presets(self, proxmox_plugin):
         """Verify presets are registered."""
@@ -47,12 +50,15 @@ class TestProxmoxManifestIntegration:
         assert "contact-email" in field_ids
         assert "fqdn" in field_ids
 
-    def test_proxmox_manifest_requires_proxmox_assistant(self, proxmox_plugin):
-        """Verify command dependency is declared."""
+    def test_proxmox_manifest_uses_container_builder(self, proxmox_plugin):
         commands = proxmox_plugin.manifest.get("requires", {}).get("commands", [])
-        
-        command_names = [c["name"] for c in commands]
-        assert "proxmox-auto-install-assistant" in command_names
+        assert commands == []
+        action = next(
+            item
+            for item in proxmox_plugin.manifest["actions"]["on_iso_ready"]
+            if item["type"] == "run_builder"
+        )
+        assert action["builder_id"] == "proxmox-auto-install"
 
     def test_proxmox_manifest_command_not_preapproved_at_load(self, proxmox_plugin):
         """Invocation-time model should not auto-approve at plugin load."""
@@ -82,58 +88,6 @@ class TestProxmoxManifestIntegration:
             if field.get("required"):
                 assert field_id in user_config
 
-    @patch("shutil.which")
-    def test_proxmox_wrapper_requires_runtime_approval_message(self, mock_which, proxmox_plugin):
-        """Unapproved wrapper commands should instruct runtime approval, not reinstall."""
-        mock_which.return_value = "/usr/bin/proxmox-auto-install-assistant"
-
-        proxmox_plugin._execute_action(
-            action={
-                "id": "create_answer_artifact",
-                "type": "create_artifact",
-                "artifact_id": "answer_toml",
-                "content": "[global]\n",
-                "kind": "config",
-                "logical_name": "answer.toml",
-            },
-            ui_values={},
-            preset={"id": "proxmox-ve-9.1", "name": "Proxmox VE 9.1"},
-            iso_path="/tmp/test.iso",
-        )
-        proxmox_plugin._execute_action(
-            action={
-                "id": "create_firstboot_artifact",
-                "type": "create_artifact",
-                "artifact_id": "firstboot_script",
-                "content": "#!/bin/sh\necho ok\n",
-                "kind": "script",
-                "logical_name": "firstboot.sh",
-                "executable": True,
-            },
-            ui_values={},
-            preset={"id": "proxmox-ve-9.1", "name": "Proxmox VE 9.1"},
-            iso_path="/tmp/test.iso",
-        )
-
-        wrapper_action = next(
-            a
-            for a in proxmox_plugin.manifest.get("actions", {}).get("on_iso_ready", [])
-            if a.get("type") == "prepare_installer_iso"
-            and a.get("installer_scheme") == "proxmox-auto-install"
-        )
-
-        with pytest.raises(RuntimeError) as exc_info:
-            proxmox_plugin._execute_action(
-                action=wrapper_action,
-                ui_values={},
-                preset={"id": "proxmox-ve-9.1", "name": "Proxmox VE 9.1"},
-                iso_path="/tmp/test.iso",
-            )
-
-        msg = str(exc_info.value)
-        assert "runtime approval" in msg.lower()
-        assert "reinstall" not in msg.lower()
-
     def test_create_artifact_stores_metadata(self, proxmox_plugin):
         action = {
             "id": "create_test_artifact",
@@ -158,78 +112,6 @@ class TestProxmoxManifestIntegration:
         assert artifact.kind == "config"
         assert artifact.logical_name == "answer.toml"
         assert artifact.media_type == "application/toml"
-
-    @patch("subprocess.run")
-    @patch("shutil.which")
-    def test_proxmox_wrapper_materializes_private_staging_files(self, mock_which, mock_run, proxmox_plugin):
-        def fake_which(cmd):
-            if cmd == "sudo":
-                return "/usr/bin/sudo"
-            if cmd == "proxmox-auto-install-assistant":
-                return "/usr/bin/proxmox-auto-install-assistant"
-            return None
-
-        mock_which.side_effect = fake_which
-        mock_run.return_value.stdout = ""
-        mock_run.return_value.stderr = ""
-
-        proxmox_plugin._plugin_allowed_commands.add("proxmox-auto-install-assistant")
-        proxmox_plugin._execute_action(
-            action={
-                "id": "create_answer_artifact",
-                "type": "create_artifact",
-                "artifact_id": "answer_toml",
-                "content": "[global]\n",
-                "kind": "config",
-                "logical_name": "answer.toml",
-            },
-            ui_values={},
-            preset={"id": "proxmox-ve-9.1", "name": "Proxmox VE 9.1"},
-            iso_path="/tmp/input.iso",
-        )
-        proxmox_plugin._execute_action(
-            action={
-                "id": "create_firstboot_artifact",
-                "type": "create_artifact",
-                "artifact_id": "firstboot_script",
-                "content": "#!/bin/sh\necho ok\n",
-                "kind": "script",
-                "logical_name": "firstboot.sh",
-                "executable": True,
-            },
-            ui_values={},
-            preset={"id": "proxmox-ve-9.1", "name": "Proxmox VE 9.1"},
-            iso_path="/tmp/input.iso",
-        )
-
-        result = proxmox_plugin._execute_action(
-            action={
-                "id": "inject_into_iso",
-                "type": "prepare_installer_iso",
-                "installer_scheme": "proxmox-auto-install",
-                "iso_path": "{{iso_path}}",
-                "output_path": "/tmp/input-tailscale.iso",
-                "artifact_map": {
-                    "answer-file": "answer_toml",
-                    "first-boot": "firstboot_script",
-                },
-                "sudo": True,
-            },
-            ui_values={},
-            preset={"id": "proxmox-ve-9.1", "name": "Proxmox VE 9.1"},
-            iso_path="/tmp/input.iso",
-        )
-
-        assert result == "/tmp/input-tailscale.iso"
-        invoked_cmd = mock_run.call_args.args[0]
-        assert invoked_cmd[:3] == ["sudo", "-n", "proxmox-auto-install-assistant"]
-        assert "--answer-file" in invoked_cmd
-        assert "--on-first-boot" in invoked_cmd
-        answer_path = Path(invoked_cmd[invoked_cmd.index("--answer-file") + 1])
-        firstboot_path = Path(invoked_cmd[invoked_cmd.index("--on-first-boot") + 1])
-        assert answer_path.name == "answer.toml"
-        assert firstboot_path.name == "firstboot.sh"
-        assert "spark-proxmox-" in answer_path.parent.name
 
     def test_phase_cleanup_clears_artifacts_after_failure(self, proxmox_plugin):
         proxmox_plugin.manifest["actions"] = {
@@ -328,7 +210,7 @@ class TestUbuntuLivePersistenceManifestIntegration:
     def test_manifest_loads_successfully(self, ubuntu_live_persistence_plugin):
         assert ubuntu_live_persistence_plugin.name == "Ubuntu Live Persistence"
         assert ubuntu_live_persistence_plugin.manifest["metadata"]["id"] == "ubuntu-live-persistence"
-        assert ubuntu_live_persistence_plugin.manifest["version"] == "1.4"
+        assert ubuntu_live_persistence_plugin.manifest["version"] == "1.6"
 
     def test_manifest_is_post_write_only(self, ubuntu_live_persistence_plugin):
         assert ubuntu_live_persistence_plugin.requires_processing() is False
@@ -387,7 +269,7 @@ class TestUbuntuAutoinstallManifestIntegration:
     def test_manifest_loads_successfully(self, ubuntu_autoinstall_plugin):
         assert ubuntu_autoinstall_plugin.name == "Ubuntu Autoinstall"
         assert ubuntu_autoinstall_plugin.manifest["metadata"]["id"] == "ubuntu-autoinstall"
-        assert ubuntu_autoinstall_plugin.manifest["version"] == "1.4"
+        assert ubuntu_autoinstall_plugin.manifest["version"] == "1.6"
 
     def test_manifest_uses_host_owned_nocloud_wrapper(self, ubuntu_autoinstall_manifest):
         actions = ubuntu_autoinstall_manifest["actions"]["on_iso_ready"]
@@ -529,7 +411,7 @@ class TestManifestLoadingFromDisk:
         """Verify the manifest follows the schema."""
         # Check required top-level fields
         assert "version" in proxmox_manifest
-        assert proxmox_manifest["version"] == "1.4"
+        assert proxmox_manifest["version"] == "1.6"
         
         assert "metadata" in proxmox_manifest
         assert proxmox_manifest["metadata"].get("id")
@@ -543,8 +425,31 @@ class TestManifestLoadingFromDisk:
         assert "secure_manifest" not in proxmox_manifest
         assert "signature" not in proxmox_manifest
 
+    def test_manifest_16_rejects_legacy_proxmox_host_action(self, tmp_path):
+        manifest = {
+            "version": "1.6",
+            "metadata": {"id": "legacy-proxmox", "name": "Legacy Proxmox"},
+            "requires": {"commands": []},
+            "actions": {
+                "on_iso_ready": [
+                    {
+                        "id": "legacy",
+                        "type": "prepare_installer_iso",
+                        "installer_scheme": "proxmox-auto-install",
+                        "iso_path": "{{iso_path}}",
+                        "output_path": "{{iso_path}}",
+                    }
+                ]
+            },
+        }
+        path = tmp_path / "legacy.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        plugin = JsonSparkPlug(str(path))
+        assert plugin.is_available is False
+        assert "must use run_builder" in (plugin.unavailable_reason or "")
+
     def test_ubuntu_live_persistence_manifest_has_expected_shape(self, ubuntu_live_persistence_manifest):
-        assert ubuntu_live_persistence_manifest["version"] == "1.4"
+        assert ubuntu_live_persistence_manifest["version"] == "1.6"
         assert ubuntu_live_persistence_manifest["metadata"]["id"] == "ubuntu-live-persistence"
         assert ubuntu_live_persistence_manifest["requires"]["commands"] == []
         assert ubuntu_live_persistence_manifest.get("config_fields", []) == []
@@ -571,24 +476,13 @@ class TestManifestPermissionFlow:
 
         requires = plugin.manifest.get("requires", {}).get("commands", [])
         declared = {c.get("name") for c in requires if c.get("name")}
-        pending = plugin.get_pending_phase_approval("on_iso_ready")
-        assert pending is not None
-        phase_commands = set(pending.commands)
-
-        # Batch approval policy: pre-phase prompt should cover every phase command.
-        # This test encodes the contract by requiring the failure payload to mention
-        # all executables in the current phase when unapproved.
-        with pytest.raises(RuntimeError) as exc_info:
-            plugin.on_iso_ready(
-                iso_path="/tmp/test.iso",
-                preset={"id": "proxmox-ve-9.1", "name": "Proxmox VE 9.1"},
-                ui_values={"contact-email": "admin@example.com", "fqdn": "proxmox.example.org"},
-            )
-
-        msg = str(exc_info.value)
-        for cmd_name in phase_commands:
-            assert cmd_name in declared
-            assert cmd_name in msg
+        assert declared == set()
+        action = next(
+            item
+            for item in plugin.manifest["actions"]["on_iso_ready"]
+            if item["type"] == "run_builder"
+        )
+        assert action["image"] == "spark-writer/proxmox-auto-install:trixie-v2"
 
 
 class TestArtifactValidation:
@@ -623,7 +517,7 @@ class TestArtifactValidation:
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
         manifest = tmp_path / "retired.json"
         manifest.write_text(
-            '{"version":"1.4","metadata":{"id":"retired","name":"Retired"},'
+            '{"version": "1.6","metadata":{"id":"retired","name":"Retired"},'
             '"requires":{"commands":[]},"actions":{"on_iso_ready":['
             '{"id":"legacy","type":"write_file","content":"x","path":"/tmp/x"}]}}',
             encoding="utf-8",

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from spark_writer.core.download_engine import resolve_torrent_artifact
+from spark_writer.core.download_engine import _resolve_kind, resolve_torrent_artifact
 
 
 class FakeStorage:
@@ -24,6 +24,21 @@ class FakeTorrentInfo:
 
     def files(self):
         return self._storage
+
+
+@pytest.mark.parametrize(
+    ("url", "declared_kind", "expected"),
+    [
+        ("https://example.com/image.iso.torrent", "direct", "torrent"),
+        ("https://example.com/image.iso.torrent?download=1", "direct", "torrent"),
+        ("magnet:?xt=urn:btih:abc", "direct", "magnet"),
+        ("https://example.com/image.iso", "direct", "direct"),
+    ],
+)
+def test_resolve_kind_does_not_treat_torrent_metadata_as_an_iso(
+    url, declared_kind, expected
+):
+    assert _resolve_kind(url, declared_kind) == expected
 
 
 def test_resolve_torrent_artifact_uses_single_iso(tmp_path):

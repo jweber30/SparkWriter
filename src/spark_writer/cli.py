@@ -16,7 +16,8 @@ from typing import Any, Iterable, Optional
 from usb_writer_core.writer import write_iso_to_device
 
 from .core.download_engine import DownloadEvent, download_source_image
-from .plugins.json_plugin import JsonSparkPlug
+from .core.verified_image import verify_image
+from .plugins.json_plugin import JsonSparkPlug, RuntimeApprovalRequiredError
 from .plugins.manifest_assets import discover_template_sidecars, resolve_sidecar_url
 from .plugins.manifest_schema import validate_manifest_schema
 from .plugins.signing import (
@@ -101,12 +102,33 @@ def run_write(args: argparse.Namespace) -> None:
         print(f"Target device: {target}")
 
         iso_path = _download_source(source, temp_root / "downloads")
-        processed_path = plugin.on_iso_ready(str(iso_path), source_data, ui_values)
+        source_image = verify_image(
+            iso_path,
+            expected_sha256=source.sha256 or None,
+            provenance=f"source:{source.id}",
+        )
+        processed_path = _run_with_runtime_approval(
+            plugin,
+            "on_iso_ready",
+            lambda: plugin.on_iso_ready(str(source_image.path), source_data, ui_values),
+        )
+        if Path(processed_path).resolve() == source_image.path:
+            final_image = source_image
+        else:
+            final_image = verify_image(
+                processed_path,
+                provenance=f"builder:{plugin.plugin_id}",
+                compute_hash=False,
+            )
 
-        print(f"Writing {processed_path} to {target}")
-        write_iso_to_device(Path(processed_path), target, progress_callback=_progress_callback)
+        print(f"Writing {final_image.path} to {target}")
+        write_iso_to_device(final_image, target, progress_callback=_progress_callback)
 
-        plugin.on_write_complete(target, source_data, ui_values)
+        _run_with_runtime_approval(
+            plugin,
+            "on_write_complete",
+            lambda: plugin.on_write_complete(target, source_data, ui_values),
+        )
 
         secrets = plugin.get_ephemeral_secrets()
         if secrets:
@@ -289,7 +311,9 @@ def _require_runtime_approvals(plugin: JsonSparkPlug, phases: Iterable[str]) -> 
         if not phase_pending:
             continue
 
-        commands = ", ".join(phase_pending.commands)
+        approval_items = list(phase_pending.commands)
+        approval_items.extend(item["display"] for item in phase_pending.builders)
+        commands = ", ".join(approval_items)
         print(
             f"Manifest '{plugin.name}' needs runtime command approval for {phase}: {commands}",
             file=sys.stderr,
@@ -299,9 +323,34 @@ def _require_runtime_approvals(plugin: JsonSparkPlug, phases: Iterable[str]) -> 
             raise CliError(f"runtime command approval declined for {phase}")
 
         try:
-            plugin.approve_runtime_commands(phase_pending.commands)
+            plugin.approve_runtime_phase(phase_pending)
         except Exception as exc:
             raise CliError(f"failed to persist runtime approval for {phase}: {exc}") from exc
+
+
+def _run_with_runtime_approval(
+    plugin: JsonSparkPlug,
+    phase: str,
+    action: Any,
+) -> Any:
+    try:
+        return action()
+    except RuntimeApprovalRequiredError as exc:
+        items = list(exc.pending.commands)
+        items.extend(item["display"] for item in exc.pending.builders)
+        print(
+            f"Manifest '{plugin.name}' needs runtime approval for {phase}: "
+            + ", ".join(items),
+            file=sys.stderr,
+        )
+        response = input("Approve and remember these operations? [y/N] ").strip().lower()
+        if response not in {"y", "yes"}:
+            raise CliError(f"runtime approval declined for {phase}") from exc
+        plugin.approve_runtime_phase(exc.pending)
+        try:
+            return action()
+        except RuntimeApprovalRequiredError as retry_exc:
+            raise CliError(f"runtime approval retry failed for {phase}") from retry_exc
 
 
 def _download_source(source: Source, download_dir: Path) -> Path:

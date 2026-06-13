@@ -15,6 +15,7 @@ from .models import (
     IsoProfile,
     IsoSourceType,
     NotificationConfig,
+    VerifiedImage,
     WipeMode,
     WriteIntent,
     WriteSession,
@@ -40,14 +41,6 @@ from .writer import (
     write_files_to_partition,
     write_iso_to_device,
 )
-from .iso_utils import (
-    ISOError,
-    check_xorriso_available,
-    extract_iso,
-    inject_cloud_init_nocloud,
-    modify_grub_config,
-    repack_iso,
-)
 from .receipts import (
     ReceiptError,
     ReceiptSigningError,
@@ -61,7 +54,7 @@ from .receipts import (
     sign_with_key,
 )
 
-__version__ = "0.1.22"
+__version__ = "0.1.45"
 
 __all__ = [
     # Domain Models
@@ -72,6 +65,7 @@ __all__ = [
     "IsoProfile",
     "IsoSourceType",
     "NotificationConfig",
+    "VerifiedImage",
     "WipeMode",
     "WriteIntent",
     "WriteSession",
@@ -99,13 +93,6 @@ __all__ = [
     "inject_grub_kernel_params",
     "write_files_to_partition",
     "write_iso_to_device",
-    # ISO Utils
-    "ISOError",
-    "check_xorriso_available",
-    "extract_iso",
-    "inject_cloud_init_nocloud",
-    "modify_grub_config",
-    "repack_iso",
     # Receipts
     "ReceiptError",
     "ReceiptSigningError",

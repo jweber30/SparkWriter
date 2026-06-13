@@ -1,0 +1,23 @@
+FROM debian:13-slim
+
+ARG APT_PROXY
+
+RUN if [ -n "${APT_PROXY}" ]; then \
+        printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "%s";\n' \
+            "${APT_PROXY}" "${APT_PROXY}" \
+            > /etc/apt/apt.conf.d/99-spark-builder-proxy; \
+    fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl python3 \
+    && curl -fsSL https://enterprise.proxmox.com/debian/proxmox-release-trixie.gpg \
+       -o /usr/share/keyrings/proxmox-release-trixie.gpg \
+    && printf '%s\n' \
+       'deb [arch=amd64 signed-by=/usr/share/keyrings/proxmox-release-trixie.gpg] http://download.proxmox.com/debian/pve trixie pve-no-subscription' \
+       > /etc/apt/sources.list.d/proxmox.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends proxmox-auto-install-assistant xorriso \
+    && rm -f /etc/apt/apt.conf.d/99-spark-builder-proxy \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY builder.py /usr/local/bin/spark-proxmox-builder
+ENTRYPOINT ["python3", "/usr/local/bin/spark-proxmox-builder"]

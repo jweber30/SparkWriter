@@ -5,6 +5,7 @@ import logging
 import os
 from typing import Any, Optional
 
+from ..builders import OciBuilderRunner
 from .action_context import PendingPhaseApproval, RuntimeApprovalRequiredError
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,7 @@ class JsonPluginApprovalMixin:
     manifest: dict[str, Any]
     manifest_path: str
     _plugin_allowed_commands: set[str]
+    _approved_builders: set[str]
 
     def _load_approved_commands(self) -> None:
         """Load user-approved commands from invocation-time approval metadata."""
@@ -45,6 +47,11 @@ class JsonPluginApprovalMixin:
 
                 approved = approval_data.get('approved_commands', [])
                 self._plugin_allowed_commands.update(approved)
+                approved_builders = approval_data.get("approved_builders", [])
+                if isinstance(approved_builders, list):
+                    self._approved_builders.update(
+                        str(item) for item in approved_builders if str(item).strip()
+                    )
                 loaded_any = True
 
                 if approved:
@@ -79,9 +86,15 @@ class JsonPluginApprovalMixin:
             return None
         phase_commands = self._collect_phase_commands(actions)
         pending = [cmd for cmd in phase_commands if cmd not in self._plugin_allowed_commands]
-        if not pending:
+        builders = self._collect_phase_builders(actions)
+        pending_builders = [
+            {"key": identity.approval_key, "display": identity.display}
+            for identity in builders
+            if identity.approval_key not in self._approved_builders
+        ]
+        if not pending and not pending_builders:
             return None
-        return PendingPhaseApproval(phase_name, pending)
+        return PendingPhaseApproval(phase_name, pending, pending_builders)
 
     def approve_runtime_commands(self, commands: list[str]) -> None:
         """Persist and activate newly approved runtime commands for this plugin."""
@@ -98,6 +111,7 @@ class JsonPluginApprovalMixin:
             "plugin_id": plugin_id,
             "approval_model": APPROVAL_MODEL_VERSION,
             "approved_commands": merged,
+            "approved_builders": sorted(self._approved_builders),
         }
 
         try:
@@ -116,6 +130,16 @@ class JsonPluginApprovalMixin:
                 ", ".join(sorted(normalized)),
             )
 
+    def approve_runtime_builders(self, approval_keys: list[str]) -> None:
+        normalized = {str(key).strip() for key in approval_keys if str(key).strip()}
+        self._approved_builders.update(normalized)
+        self.approve_runtime_commands([])
+
+    def approve_runtime_phase(self, pending: PendingPhaseApproval) -> None:
+        if pending.builders:
+            self._approved_builders.update(item["key"] for item in pending.builders)
+        self.approve_runtime_commands(pending.commands)
+
     def _collect_phase_commands(self, actions: list[dict[str, Any]]) -> list[str]:
         """Return unique executable names needed by a phase in order."""
 
@@ -128,6 +152,33 @@ class JsonPluginApprovalMixin:
                 phase_commands.append(cmd_name)
         return phase_commands
 
+    def _collect_phase_builders(self, actions: list[dict[str, Any]]) -> list[Any]:
+        identities = []
+        for action in actions:
+            if action.get("type") != "run_builder":
+                continue
+            builder_id = str(action.get("builder_id", "")).strip()
+            image = str(action.get("image", "")).strip()
+            if not builder_id or not image:
+                continue
+            identity = OciBuilderRunner().resolve_identity(
+                builder_id=builder_id,
+                image=image,
+                network=bool(action.get("network", False)),
+            )
+            identities.append(identity)
+        return identities
+
+    def ensure_builder_approved(self, identity: Any) -> None:
+        if identity.approval_key in self._approved_builders:
+            return
+        raise self._build_runtime_approval_error(
+            PendingPhaseApproval(
+                self._current_phase_name(),
+                builders=[{"key": identity.approval_key, "display": identity.display}],
+            )
+        )
+
     def _command_name_for_action(self, action: dict[str, Any]) -> Optional[str]:
         action_type = action.get('type')
         if action_type == 'run_command':
@@ -135,11 +186,6 @@ class JsonPluginApprovalMixin:
             if command and isinstance(command[0], str):
                 return command[0]
             return None
-        if (
-            action_type == 'prepare_installer_iso'
-            and str(action.get('installer_scheme', '')).strip() == 'proxmox-auto-install'
-        ):
-            return self._PROXMOX_WRAPPER_COMMAND
         return None
 
     def _build_runtime_approval_error(self, pending: PendingPhaseApproval) -> RuntimeApprovalRequiredError:
@@ -153,6 +199,14 @@ class JsonPluginApprovalMixin:
 
         phase_commands = self._collect_phase_commands(actions)
         pending = [cmd for cmd in phase_commands if cmd not in self._plugin_allowed_commands]
-        if not pending:
+        builders = self._collect_phase_builders(actions)
+        pending_builders = [
+            {"key": identity.approval_key, "display": identity.display}
+            for identity in builders
+            if identity.approval_key not in self._approved_builders
+        ]
+        if not pending and not pending_builders:
             return
-        raise self._build_runtime_approval_error(PendingPhaseApproval(phase_name, pending))
+        raise self._build_runtime_approval_error(
+            PendingPhaseApproval(phase_name, pending, pending_builders)
+        )

@@ -69,13 +69,13 @@ def download_source_image(
 
 
 def _resolve_kind(url: str, acquire_kind: Optional[str]) -> str:
-    if acquire_kind:
-        return acquire_kind
     lowered = url.lower()
     if lowered.startswith("magnet:"):
         return "magnet"
-    if lowered.endswith(".torrent"):
+    if urlparse(lowered).path.endswith(".torrent"):
         return "torrent"
+    if acquire_kind:
+        return acquire_kind
     return "direct"
 
 

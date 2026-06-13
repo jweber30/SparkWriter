@@ -23,8 +23,20 @@ class Source:
     installer_scheme: Optional[str] = None
     capabilities: List[str] = field(default_factory=list)
     sparkplug_id: Optional[str] = None
+    sparkplug_name: Optional[str] = None
+    manifest_origin: Optional[str] = None
     can_write_usb: bool = True
     can_export_iso: bool = True
+
+    @property
+    def display_label(self) -> str:
+        """Identify the owning manifest in Source selectors."""
+        if self.manifest_origin:
+            manifest_name = self.sparkplug_name or self.sparkplug_id or "Installed manifest"
+            return f"{manifest_name} - {self.manifest_origin}"
+        if self.sparkplug_name:
+            return f"{self.sparkplug_name} - {self.name}"
+        return self.name
 
     @classmethod
     def from_dict(cls, raw: Dict[str, Any]) -> "Source":
@@ -40,6 +52,8 @@ class Source:
         acquire_artifact = str(acquire.get("artifact", "")).strip() or None
         installer_scheme = str(raw.get("installer_scheme", "")).strip() or None
         sparkplug_id = str(raw.get("sparkplug_id", "")).strip() or None
+        sparkplug_name = str(raw.get("sparkplug_name", "")).strip() or None
+        manifest_origin = str(raw.get("manifest_origin", "")).strip() or None
 
         outputs = raw.get("outputs", {})
         if not isinstance(outputs, dict):
@@ -71,6 +85,8 @@ class Source:
             installer_scheme=installer_scheme,
             capabilities=capabilities,
             sparkplug_id=sparkplug_id,
+            sparkplug_name=sparkplug_name,
+            manifest_origin=manifest_origin,
             can_write_usb=can_write_usb,
             can_export_iso=can_export_iso,
         )
@@ -96,6 +112,10 @@ class Source:
         }
         if self.sparkplug_id:
             payload["sparkplug_id"] = self.sparkplug_id
+        if self.sparkplug_name:
+            payload["sparkplug_name"] = self.sparkplug_name
+        if self.manifest_origin:
+            payload["manifest_origin"] = self.manifest_origin
         if self.version:
             payload["version"] = self.version
             payload["source_version"] = self.version

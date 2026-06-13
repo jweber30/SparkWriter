@@ -11,7 +11,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -25,6 +25,7 @@ from spark_writer.plugins.json_plugin import (
     JsonSparkPlug,
     RuntimeApprovalRequiredError,
 )
+from spark_writer.builders.runner import BuilderIdentity
 from spark_writer.plugins.manifest_schema import validate_manifest_schema
 
 
@@ -48,7 +49,7 @@ def make_manifest(plugin_id="test-plugin", commands=None, actions=None):
     ]
 
     manifest = {
-        "version": "1.4",
+        "version": "1.6",
         "metadata": {
             "id": plugin_id,
             "name": "Test Plugin",
@@ -285,6 +286,52 @@ def test_get_pending_phase_approval_returns_commands_for_preflight(mock_which, t
     assert pending.commands == ["cmd-a"]
 
 
+def test_get_pending_phase_approval_resolves_builder_identity(
+    temp_plugin_dir, monkeypatch
+):
+    manifest = make_manifest(
+        plugin_id="builder-preflight",
+        actions={
+            "on_iso_ready": [
+                {
+                    "id": "build",
+                    "type": "run_builder",
+                    "builder_id": "test-builder",
+                    "image": "example.test/builder:latest",
+                    "source_path": "{{iso_path}}",
+                    "artifact_map": {},
+                    "network": False,
+                }
+            ]
+        },
+    )
+    manifest_file = write_manifest(temp_plugin_dir, "builder-preflight", manifest)
+    identity = BuilderIdentity(
+        builder_id="test-builder",
+        image="example.test/builder:latest",
+        digest="a" * 64,
+        network=False,
+    )
+    resolve_identity = Mock(return_value=identity)
+    monkeypatch.setattr(
+        "spark_writer.plugins.json_plugin_approvals.OciBuilderRunner.resolve_identity",
+        resolve_identity,
+    )
+
+    plugin = JsonSparkPlug(str(manifest_file))
+    pending = plugin.get_pending_phase_approval("on_iso_ready")
+
+    assert pending is not None
+    assert pending.builders == [
+        {"key": identity.approval_key, "display": identity.display}
+    ]
+    resolve_identity.assert_called_once_with(
+        builder_id="test-builder",
+        image="example.test/builder:latest",
+        network=False,
+    )
+
+
 def test_post_write_only_plugin_still_supports_local_iso_save(temp_plugin_dir):
     manifest = make_manifest(
         plugin_id="local-save-only",
@@ -325,11 +372,13 @@ def test_built_in_ubuntu_live_persistence_plugin_has_no_runtime_command_approval
 
 
 def test_proxmox_wrapper_participates_in_phase_approval(proxmox_plugin):
-    pending = proxmox_plugin.get_pending_phase_approval("on_iso_ready")
-
-    assert pending is not None
-    assert pending.phase_name == "on_iso_ready"
-    assert pending.commands == ["proxmox-auto-install-assistant"]
+    action = next(
+        item
+        for item in proxmox_plugin.manifest["actions"]["on_iso_ready"]
+        if item["type"] == "run_builder"
+    )
+    assert action["builder_id"] == "proxmox-auto-install"
+    assert action["network"] is False
 
 
 def test_missing_template_variable_error_identifies_variable_name(temp_plugin_dir):
@@ -413,7 +462,7 @@ def test_schema_requires_install_disclosure_fields_for_commands():
     assert "allow_plugin_specific" in required
 
 
-def test_schema_declares_manifest_version_1_4_and_return_delivery():
+def test_schema_declares_manifest_version_1_6_and_return_delivery():
     schema_path = (
         PACKAGE_ROOT
         / "src"
@@ -426,7 +475,7 @@ def test_schema_declares_manifest_version_1_4_and_return_delivery():
     with open(schema_path, "r", encoding="utf-8") as f:
         schema = json.load(f)
 
-    assert schema["properties"]["version"]["enum"] == ["1.4", "1.5"]
+    assert schema["properties"]["version"]["enum"] == ["1.6"]
     acquire = schema["definitions"]["source"]["properties"]["acquire"]
     assert "artifact" in acquire["properties"]
     return_delivery = schema["properties"]["return_delivery"]
@@ -439,7 +488,7 @@ def test_schema_declares_manifest_version_1_4_and_return_delivery():
 
 def test_locked_manifest_version_runs_json_schema_validation():
     manifest = {
-        "version": "1.4",
+        "version": "1.6",
         "metadata": {
             "id": "schema-test",
             "name": "Schema Test",
@@ -467,7 +516,7 @@ def test_locked_manifest_version_runs_json_schema_validation():
 
 def test_locked_manifest_version_rejects_schema_errors():
     manifest = {
-        "version": "1.4",
+        "version": "1.6",
         "metadata": {
             "id": "Bad_ID",
             "name": "Bad ID",
@@ -540,11 +589,6 @@ def test_schema_allows_dotted_preset_ids():
 
 
 def test_manifest_commands_include_disclosure_metadata(proxmox_manifest):
-    """Install-time command warning UI needs command description and install guidance."""
+    """The containerized Proxmox workflow has no host command dependency."""
     commands = proxmox_manifest.get("requires", {}).get("commands", [])
-
-    assert commands, "Expected at least one command requirement"
-    for cmd in commands:
-        assert cmd.get("name")
-        assert cmd.get("description")
-        assert cmd.get("install_hint")
+    assert commands == []

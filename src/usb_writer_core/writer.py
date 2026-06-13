@@ -9,11 +9,14 @@ import json
 import logging
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 from typing import Optional, Dict, List, Any
+
+from .models import VerifiedImage
 
 logger = logging.getLogger(__name__)
 
@@ -94,36 +97,73 @@ def wipe_device(device_path: str) -> None:
         device_path: Target device (e.g., /dev/sdb)
     """
     logger.info(f"Wiping device {device_path}")
+
+    def _run_if_available(command: List[str], *, capture_output: bool = False) -> None:
+        binary = command[0]
+        if shutil.which(binary) is None:
+            logger.warning("Wipe warning (continuing anyway): %s not found", binary)
+            return
+        try:
+            subprocess.run(
+                command,
+                check=False,
+                capture_output=capture_output,
+            )
+        except Exception as e:
+            logger.warning("Wipe warning (continuing anyway): %s", e)
+
+    # Wipe filesystem signatures.
+    _run_if_available(["wipefs", "-a", device_path], capture_output=True)
+
+    # Zap GPT structures.
+    _run_if_available(["sgdisk", "-Z", device_path], capture_output=True)
+
+    # Force kernel to reload partition table.
+    _run_if_available(["partprobe", device_path])
+    _run_if_available(["udevadm", "settle"])
+    time.sleep(1)
+
+
+def _open_verified_image(image: VerifiedImage) -> int:
+    """Open a verified image for writing with minimal sanity checks.
+    
+    The VerifiedImage contract guarantees the file was validated. We perform
+    only basic checks: file type, size consistency. No re-hashing.
+    Minimum file size can be specified in the manifest if needed.
+    """
+    if not isinstance(image, VerifiedImage):
+        raise USBWriteError("write_iso_to_device requires a VerifiedImage")
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        # Wipe filesystem signatures
-        subprocess.run(
-            ["wipefs", "-a", device_path], 
-            check=False, 
-            capture_output=True
-        )
-        
-        # Zap GPT structures
-        subprocess.run(
-            ["sgdisk", "-Z", device_path], 
-            check=False, 
-            capture_output=True
-        )
-        
-        # Force kernel to reload partition table
-        subprocess.run(["partprobe", device_path], check=False)
-        subprocess.run(["udevadm", "settle"], check=False)
-        time.sleep(1)
-        
-    except Exception as e:
-        logger.warning(f"Wipe warning (continuing anyway): {e}")
+        fd = os.open(image.path, flags)
+    except OSError as exc:
+        raise USBWriteError(f"Unable to open verified image: {exc}") from exc
+
+    try:
+        file_stat = os.fstat(fd)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise USBWriteError("Verified image must be a regular file")
+        if file_stat.st_size != image.size_bytes or file_stat.st_size <= 0:
+            raise USBWriteError("Verified image size changed before write")
+
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
 
 
-def write_iso_to_device(iso_path: Path, device_path: str, block_size: str = "4M", progress_callback=None) -> None:
+def write_iso_to_device(
+    image: VerifiedImage,
+    device_path: str,
+    block_size: str = "4M",
+    progress_callback=None,
+) -> None:
     """
     Write an ISO image to a USB device using dd.
     
     Args:
-        iso_path: Path to the ISO file
+        image: Verified image contract
         device_path: Target device (e.g., /dev/sdb)
         block_size: Block size for dd (default: 4M)
         progress_callback: Optional callback(bytes_written, total_bytes)
@@ -131,26 +171,28 @@ def write_iso_to_device(iso_path: Path, device_path: str, block_size: str = "4M"
     Raises:
         USBWriteError: If write operation fails
     """
-    if not iso_path.exists():
-        raise USBWriteError(f"ISO file not found: {iso_path}")
-    
     if not Path(device_path).exists():
         raise USBWriteError(f"Device not found: {device_path}")
-    
-    # Wipe device first to ensure clean state
-    wipe_device(device_path)
-    
-    logger.info(f"Writing ISO {iso_path} to {device_path} with block size {block_size}")
-    
-    total_size = iso_path.stat().st_size
-    
+
+    image_fd = _open_verified_image(image)
     try:
-        cmd = ["dd", f"if={iso_path}", f"of={device_path}", f"bs={block_size}", "oflag=sync", "status=progress"]
+        wipe_device(device_path)
+        logger.info("Writing verified image to %s with block size %s", device_path, block_size)
+        total_size = image.size_bytes
+        cmd = [
+            "dd",
+            f"if=/proc/self/fd/{image_fd}",
+            f"of={device_path}",
+            f"bs={block_size}",
+            "oflag=sync",
+            "status=progress",
+        ]
         
         process = subprocess.Popen(
             cmd,
             stderr=subprocess.PIPE,
-            universal_newlines=True
+            universal_newlines=True,
+            pass_fds=(image_fd,),
         )
         
         # Parse stderr for progress
@@ -180,6 +222,8 @@ def write_iso_to_device(iso_path: Path, device_path: str, block_size: str = "4M"
     except subprocess.CalledProcessError as e:
         error_msg = e.stderr if e.stderr else str(e)
         raise USBWriteError(f"Failed to write ISO: {error_msg}")
+    finally:
+        os.close(image_fd)
 
 
 def create_aux_partition(
@@ -269,6 +313,34 @@ def find_partition_by_label(device_path: str, label: str, max_attempts: int = 10
             time.sleep(1)
     
     raise PartitionNotFoundError(f"Could not find partition labeled '{label}' on {device_path}")
+
+
+def _search_partitions(
+    node: Dict[str, Any],
+    device_path: str,
+    label: str,
+    *,
+    inside_target: bool = False,
+) -> Optional[str]:
+    name = str(node.get("name", "")).strip()
+    target_name = Path(device_path).name
+    is_target = inside_target or name == target_name or name == device_path
+
+    if is_target and str(node.get("partlabel") or "") == label:
+        return name if name.startswith("/dev/") else f"/dev/{name}"
+
+    for child in node.get("children") or []:
+        if not isinstance(child, dict):
+            continue
+        match = _search_partitions(
+            child,
+            device_path,
+            label,
+            inside_target=is_target,
+        )
+        if match:
+            return match
+    return None
 
 
 def partition_exists(device_path: str, label: str) -> bool:

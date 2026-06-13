@@ -261,7 +261,7 @@ From reviewing the current code and tests, these are the clearest gaps:
 4. The builder is only lightly tested at the SparkWriter layer.
 5. There are now two receipt concepts in the codebase:
    - the SparkWriter-owned whole-run receipt in `src/spark_writer/receipts.py`
-   - the manifest action `generate_receipt` in `src/spark_writer/plugins/json_plugin.py`
+  - legacy manifest action `generate_receipt` in `src/spark_writer/plugins/json_plugin.py` (not supported in manifest version `1.6`)
 
 That last point is important. The code supports both:
 

@@ -66,8 +66,8 @@ def test_render_raises_on_undefined_variable():
 def _minimal_manifest(templates: dict, tmp_path: Path) -> JsonSparkPlug:
     """Build a minimal loadable manifest JSON and return a JsonSparkPlug for it."""
     manifest = {
-        "version": "1.4",
-        "metadata": {"id": "test-plugin", "name": "Test Plugin", "version": "1.4"},
+        "version": "1.6",
+        "metadata": {"id": "test-plugin", "name": "Test Plugin", "version": "1.6"},
         "requires": {"commands": []},
         "config_fields": [],
         "templates": templates,
@@ -90,8 +90,8 @@ def test_resolve_template_string_from_file(tmp_path):
     sidecar.write_text("#!/bin/bash\necho hello\n")
 
     manifest = {
-        "version": "1.4",
-        "metadata": {"id": "test-plugin", "name": "Test Plugin", "version": "1.4"},
+        "version": "1.6",
+        "metadata": {"id": "test-plugin", "name": "Test Plugin", "version": "1.6"},
         "requires": {"commands": []},
         "config_fields": [],
         "templates": {"script": {"file": "body.sh"}},
@@ -109,8 +109,8 @@ def test_resolve_template_string_from_named_asset(tmp_path):
     sidecar.write_text("#!/bin/bash\necho asset\n")
 
     manifest = {
-        "version": "1.4",
-        "metadata": {"id": "test-plugin", "name": "Test Plugin", "version": "1.4"},
+        "version": "1.6",
+        "metadata": {"id": "test-plugin", "name": "Test Plugin", "version": "1.6"},
         "requires": {"commands": []},
         "assets": {
             "setup_script": {
@@ -131,8 +131,8 @@ def test_resolve_template_string_from_named_asset(tmp_path):
 
 def test_resolve_template_string_file_missing_raises(tmp_path):
     manifest = {
-        "version": "1.4",
-        "metadata": {"id": "test-plugin", "name": "Test Plugin", "version": "1.4"},
+        "version": "1.6",
+        "metadata": {"id": "test-plugin", "name": "Test Plugin", "version": "1.6"},
         "requires": {"commands": []},
         "config_fields": [],
         "templates": {"t": {"file": "no-such-file.sh"}},
@@ -148,8 +148,8 @@ def test_resolve_template_string_file_missing_raises(tmp_path):
 
 def test_resolve_template_string_unknown_asset_raises(tmp_path):
     manifest = {
-        "version": "1.4",
-        "metadata": {"id": "test-plugin", "name": "Test Plugin", "version": "1.4"},
+        "version": "1.6",
+        "metadata": {"id": "test-plugin", "name": "Test Plugin", "version": "1.6"},
         "requires": {"commands": []},
         "assets": {},
         "config_fields": [],

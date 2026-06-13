@@ -10,8 +10,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from usb_writer_core import receipts as receipt_utils
 from usb_writer_core import writer as usb_writer
+from ..builders import OciBuilderRunner
+from ..core.verified_image import verify_image
 from ..return_delivery import is_secure_return_url
 
 from .action_context import (
@@ -57,20 +58,18 @@ class JsonSparkPlug(
         'compute_file_hash',
         'create_partition',
         'write_partition_files',
-        'generate_receipt',
         'format_yaml_list',
         'generate_ephemeral_password',
         'store_ephemeral_secret',
         'show_ephemeral_secret_button',
         'create_artifact',
         'prepare_installer_iso',
+        'run_builder',
     }
     _RETIRED_ACTION_TYPES = {
         'write_file': "write_file is retired; use create_artifact plus a host-owned primitive instead.",
         'modify_iso': "modify_iso is retired; use create_artifact plus prepare_installer_iso.",
     }
-    _PROXMOX_WRAPPER_COMMAND = 'proxmox-auto-install-assistant'
-
     def __init__(self, manifest_path: str):
         """Initialize from a JSON manifest file.
         
@@ -84,6 +83,7 @@ class JsonSparkPlug(
         self._available = True
         self._unavailable_reason: Optional[str] = None
         self._plugin_allowed_commands: set = set()  # Plugin-specific commands user approved
+        self._approved_builders: set = set()
         self._ephemeral_secrets: Dict[str, str] = {}  # In-memory secrets (cleared on app exit)
         self._active_phase_name: Optional[str] = None
         self._spark_writer_version = self._detect_spark_writer_version()
@@ -189,6 +189,16 @@ class JsonSparkPlug(
                     return f"Action {action_id}: {self._RETIRED_ACTION_TYPES[action_type]}"
                 if action_type not in self._SUPPORTED_ACTION_TYPES:
                     return f"Action {action_id}: unsupported action type '{action_type}'"
+                if (
+                    self.manifest.get("version") == "1.6"
+                    and action_type == "prepare_installer_iso"
+                    and str(action.get("installer_scheme", "")).strip()
+                    == "proxmox-auto-install"
+                ):
+                    return (
+                        f"Action {action_id}: Proxmox preparation must use run_builder "
+                        "in manifest version 1.6"
+                    )
 
         return None
 
@@ -293,15 +303,26 @@ class JsonSparkPlug(
     def _evaluate_availability(self) -> None:
         """Check if required external commands are available.
         
-        Note: Most operations use usb-writer-core, so plugins should rarely need
-        external commands. Plugin-specific tools (like proxmox-auto-install-assistant)
-        are automatically treated as such. 
+        Note: Most operations use host-owned primitives or OCI builders, so
+        plugins should rarely need external host commands.
         
         This method checks if commands exist on the system. The runtime execution
         in _execute_action() will check if commands are approved.
         """
         required_cmds = self.manifest.get('requires', {}).get('commands', [])
         missing = []
+        has_builder = any(
+            action.get("type") == "run_builder"
+            for actions in self.manifest.get("actions", {}).values()
+            if isinstance(actions, list)
+            for action in actions
+            if isinstance(action, dict)
+        )
+        if has_builder:
+            try:
+                OciBuilderRunner.detect_runtime()
+            except RuntimeError as exc:
+                missing.append(str(exc))
         
         for cmd_spec in required_cmds:
             cmd_name = cmd_spec.get('name')
@@ -464,6 +485,56 @@ class JsonSparkPlug(
             self._exec_ctx, action, context, self._build_runtime_approval_error
         )
 
+    def _handle_run_builder(
+        self, action: Dict[str, Any], context: Dict[str, Any]
+    ) -> Optional[str]:
+        action_id = action.get("id", "unknown")
+        builder_id = self.template_engine.render(str(action.get("builder_id", "")), context).strip()
+        image = self.template_engine.render(str(action.get("image", "")), context).strip()
+        source = self.template_engine.render(str(action.get("source_path", "")), context).strip()
+        if not builder_id or not image or not source:
+            raise RuntimeError(
+                f"Action {action_id}: builder_id, image, and source_path are required"
+            )
+
+        artifact_map = action.get("artifact_map", {})
+        if not isinstance(artifact_map, dict):
+            raise RuntimeError(f"Action {action_id}: artifact_map must be an object")
+
+        runner = OciBuilderRunner()
+        identity = runner.resolve_identity(
+            builder_id=builder_id,
+            image=image,
+            network=bool(action.get("network", False)),
+        )
+        self.ensure_builder_approved(identity)
+
+        with tempfile.TemporaryDirectory(
+            prefix="spark-builder-inputs-",
+            dir=runner._workspace_dir(),
+        ) as temp_dir:
+            materialized: Dict[str, tuple[Path, bool]] = {}
+            for role, artifact_id_value in artifact_map.items():
+                artifact_id = self.template_engine.render(str(artifact_id_value), context).strip()
+                artifact = self._exec_ctx.get_artifact(
+                    artifact_id,
+                    action_id=action_id,
+                )
+                path = self._exec_ctx.materialize_artifact(
+                    artifact,
+                    directory=Path(temp_dir),
+                    file_name=f"{role}-{artifact.logical_name}",
+                )
+                materialized[str(role)] = (path, artifact.executable)
+
+            source_image = verify_image(source, provenance=f"builder-input:{builder_id}", compute_hash=False)
+            result = runner.run(
+                identity=identity,
+                source_iso=source_image.path,
+                artifacts=materialized,
+            )
+        return str(result.artifact)
+
     def _handle_compute_file_hash(
         self, action: Dict[str, Any], context: Dict[str, Any]
     ) -> Optional[str]:
@@ -548,144 +619,6 @@ class JsonSparkPlug(
             usb_writer.write_files_to_partition(device_path, partition_label, files)
             logger.info(f"Wrote {len(files)} file(s) to partition {partition_label}")
         return None
-
-    def _handle_generate_receipt(
-        self, action: Dict[str, Any], context: Dict[str, Any]
-    ) -> Optional[str]:
-        action_id = action.get('id', 'unknown')
-        signing_spec = action.get('signing', {})
-        private_key_value = signing_spec.get('private_key')
-        if not private_key_value:
-            raise RuntimeError(f"Action {action_id}: signing.private_key is required")
-
-        private_key = str(self._render_value(private_key_value, context))
-        signature_encoding = str(self._render_value(signing_spec.get('encoding', 'base64'), context))
-
-        signing_key = receipt_utils.load_signing_key(private_key)
-        public_key_override = signing_spec.get('public_key')
-        if public_key_override:
-            encoded_public_key = str(self._render_value(public_key_override, context))
-        else:
-            encoded_public_key = receipt_utils.encode_public_key(signing_key, signature_encoding)
-
-        public_key_field = str(signing_spec.get('public_key_field', 'receipt_public_key'))
-
-        identity = self._render_mapping(action.get('identity', {}), context)
-        format_version = str(self._render_value(action.get('format_version', '1.0'), context))
-        identity.setdefault('receipt_format_version', format_version)
-
-        metadata = self.manifest.get('metadata', {})
-        identity.setdefault('sparkplug_id', metadata.get('id', 'unknown'))
-        identity.setdefault('sparkplug_version', metadata.get('version', 'unknown'))
-        identity.setdefault('spark_writer_version', self._spark_writer_version)
-        identity.setdefault(public_key_field, encoded_public_key)
-
-        inputs_spec = action.get('inputs', {})
-        public_inputs = self._render_mapping(inputs_spec.get('public', {}), context)
-
-        redacted_raw = self._render_value(inputs_spec.get('redacted', []), context)
-        if isinstance(redacted_raw, str):
-            redacted_fields = [redacted_raw]
-        elif isinstance(redacted_raw, list):
-            redacted_fields = [str(item) for item in redacted_raw]
-        else:
-            redacted_fields = []
-
-        fingerprints: Dict[str, str] = {}
-        fp_spec = inputs_spec.get('keyed_fingerprints', {})
-        if fp_spec:
-            if 'fields' in fp_spec and 'key' in fp_spec:
-                fingerprint_key = str(self._render_value(fp_spec['key'], context))
-                algorithm = str(fp_spec.get('algorithm', 'sha256'))
-                fp_encoding = str(fp_spec.get('encoding', signature_encoding))
-                fields = fp_spec.get('fields', [])
-                for raw_name in fields:
-                    field_name = str(self._render_value(raw_name, context))
-                    value = public_inputs.get(field_name)
-                    if value is None and field_name in context:
-                        value = context[field_name]
-                    if value is None:
-                        raise RuntimeError(
-                            f"Action {action_id}: cannot fingerprint undefined field '{field_name}'"
-                        )
-                    fingerprints[field_name] = receipt_utils.hmac_fingerprint(
-                        fingerprint_key,
-                        str(value),
-                        algorithm=algorithm,
-                        encoding=fp_encoding,
-                    )
-            else:
-                fingerprints = self._render_mapping(fp_spec.get('values', {}), context)
-
-        inputs_section: Dict[str, Any] = {}
-        if public_inputs:
-            inputs_section['public'] = public_inputs
-        if redacted_fields:
-            inputs_section['redacted'] = redacted_fields
-        if fingerprints:
-            inputs_section['keyed_fingerprints'] = fingerprints
-
-        artifacts = self._render_mapping(action.get('artifacts', {}), context)
-
-        run_metadata = self._render_mapping(action.get('run_metadata', {}), context)
-        if 'timestamp' not in run_metadata:
-            run_metadata['timestamp'] = receipt_utils.current_timestamp()
-
-        if 'nonce' not in run_metadata:
-            raw_nonce_bytes = self._render_value(action.get('nonce_bytes', 16), context)
-            try:
-                nonce_bytes = int(raw_nonce_bytes)
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError(f"Action {action_id}: nonce_bytes must be an integer") from exc
-            nonce_encoding = str(self._render_value(action.get('nonce_encoding', 'hex'), context))
-            run_metadata['nonce'] = receipt_utils.generate_nonce(nonce_bytes, nonce_encoding)
-
-        chain_section = self._render_mapping(action.get('chain', {}), context)
-
-        receipt_payload: Dict[str, Any] = {
-            'identity': identity,
-            'artifacts': artifacts,
-            'run_metadata': run_metadata,
-        }
-        if inputs_section:
-            receipt_payload['inputs'] = inputs_section
-        if chain_section:
-            receipt_payload['chain'] = chain_section
-
-        canonical_json = receipt_utils.canonicalize_receipt(receipt_payload)
-        receipt_hash = receipt_utils.compute_receipt_hash(canonical_json)
-        signature = receipt_utils.sign_with_key(signing_key, canonical_json, encoding=signature_encoding)
-
-        receipt_filename = str(self._render_value(action.get('receipt_filename', 'receipt.json'), context))
-        signature_filename = str(self._render_value(action.get('signature_filename', 'receipt.sig'), context))
-
-        files_bundle = {
-            receipt_filename: canonical_json,
-            signature_filename: signature,
-        }
-
-        json_var = action.get('json_output_var')
-        if json_var:
-            self._exec_ctx.action_vars[json_var] = canonical_json
-
-        signature_var = action.get('signature_output_var')
-        if signature_var:
-            self._exec_ctx.action_vars[signature_var] = signature
-
-        hash_var = action.get('hash_output_var')
-        if hash_var:
-            self._exec_ctx.action_vars[hash_var] = receipt_hash
-
-        files_var_name = action.get('files_output_var') or signing_spec.get('files_output_var')
-        if files_var_name:
-            self._exec_ctx.action_vars[files_var_name] = files_bundle
-
-        public_key_var = action.get('public_key_output_var') or signing_spec.get('public_key_output_var')
-        if public_key_var:
-            self._exec_ctx.action_vars[public_key_var] = encoded_public_key
-
-        logger.info(f"Generated receipt payload ({len(canonical_json)} bytes)")
-        return canonical_json
 
     def _handle_format_yaml_list(
         self, action: Dict[str, Any], context: Dict[str, Any]
@@ -808,13 +741,13 @@ class JsonSparkPlug(
             'compute_file_hash':           self._handle_compute_file_hash,
             'create_partition':            self._handle_create_partition,
             'write_partition_files':       self._handle_write_partition_files,
-            'generate_receipt':            self._handle_generate_receipt,
             'format_yaml_list':            self._handle_format_yaml_list,
             'generate_ephemeral_password': self._handle_generate_ephemeral_password,
             'store_ephemeral_secret':      self._handle_store_ephemeral_secret,
             'show_ephemeral_secret_button': self._handle_show_ephemeral_secret_button,
             'create_artifact':            self._handle_create_artifact,
             'prepare_installer_iso':       self._handle_prepare_installer_iso,
+            'run_builder':                 self._handle_run_builder,
         }
 
         handler = _dispatch.get(action_type)
@@ -1007,6 +940,7 @@ class JsonSparkPlug(
     def get_declared_host_action_types(self) -> List[str]:
         host_owned = {
             "prepare_installer_iso",
+            "run_builder",
         }
         action_types: List[str] = []
         seen: set[str] = set()

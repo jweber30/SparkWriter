@@ -26,6 +26,8 @@ from .return_delivery import (
 )
 from .sources import Source
 from .core.downloader import Downloader
+from .core.verified_image import verify_image
+from usb_writer_core.models import VerifiedImage
 from usb_writer_core.receipts import current_timestamp
 
 logger = logging.getLogger(__name__)
@@ -168,7 +170,11 @@ class SparkWindow(Adw.ApplicationWindow):
         # Load Drives
         self._refresh_drives()
     
-    def reload_plugins(self, message: str = "Plugins reloaded"):
+    def reload_plugins(
+        self,
+        message: str = "Plugins reloaded",
+        preferred_sparkplug_id: Optional[str] = None,
+    ):
         """Reload all plugins and refresh the UI."""
         import importlib
         import sys
@@ -189,7 +195,9 @@ class SparkWindow(Adw.ApplicationWindow):
         self._plugin_manager.load_plugins("spark_writer.plugins.installed")
         
         # Refresh Sources
-        self._load_all_sources()
+        self._load_all_sources(preferred_sparkplug_id=preferred_sparkplug_id)
+        if preferred_sparkplug_id:
+            self._source_row.grab_focus()
         
         # Show notification
         if self.pipeline:
@@ -201,16 +209,25 @@ class SparkWindow(Adw.ApplicationWindow):
         """Refresh built-in Sources and derived UI state."""
         self._load_all_sources()
 
-    def _load_all_sources(self):
+    def _load_all_sources(self, preferred_sparkplug_id: Optional[str] = None):
+        previous_source_id = self.current_source.id if self.current_source else None
         self.all_sources = self._plugin_manager.get_manifest_sources()
         model = Gtk.StringList()
 
         for source in self.all_sources:
-            model.append(source.name)
+            model.append(self._source_display_name(source))
 
         self._source_row.set_model(model)
         if self.all_sources:
-            self._source_row.set_selected(0)
+            selected = 0
+            for index, source in enumerate(self.all_sources):
+                if preferred_sparkplug_id and source.sparkplug_id == preferred_sparkplug_id:
+                    selected = index
+                    break
+                if not preferred_sparkplug_id and previous_source_id == source.id:
+                    selected = index
+                    break
+            self._source_row.set_selected(selected)
             self._on_source_changed(self._source_row)
         else:
             logger.warning("No Sources available.")
@@ -220,6 +237,10 @@ class SparkWindow(Adw.ApplicationWindow):
             self._form_builder.reset(self._pref_page)
 
         self._update_flash_button_state()
+
+    @staticmethod
+    def _source_display_name(source: Source) -> str:
+        return source.display_label
 
     def _create_config_page(self):
         page = Adw.NavigationPage(title="Spark Writer", tag="config")
@@ -236,11 +257,14 @@ class SparkWindow(Adw.ApplicationWindow):
         # 2. Source Section
         self._source_group = Adw.PreferencesGroup(
             title="Installation Source",
-            description="Select the upstream installer image."
+            description=(
+                "Choose an installed manifest. The selected manifest's installer "
+                "image URL is shown below."
+            )
         )
         self._pref_page.add(self._source_group)
 
-        self._source_row = Adw.ComboRow(title="Source")
+        self._source_row = Adw.ComboRow(title="Manifest and Installer")
         self._source_row.set_icon_name("computer-symbolic")
         self._source_row.connect("notify::selected", self._on_source_changed)
         self._source_group.add(self._source_row)
@@ -313,7 +337,10 @@ class SparkWindow(Adw.ApplicationWindow):
 
         self._return_delivery_group = Adw.PreferencesGroup(
             title="Return Delivery",
-            description="Send declared SparkPlug secrets and receipt context to a secure endpoint after write."
+            description=(
+                "A secure endpoint is required. The bearer token is optional and "
+                "is entered here at runtime, not stored in the manifest."
+            )
         )
         self._final_pref_page.add(self._return_delivery_group)
 
@@ -327,9 +354,12 @@ class SparkWindow(Adw.ApplicationWindow):
         self._return_delivery_group.add(self._return_endpoint_url_row)
 
         if hasattr(Adw, "PasswordEntryRow"):
-            self._return_bearer_token_row = Adw.PasswordEntryRow(title="Bearer Token")
+            self._return_bearer_token_row = Adw.PasswordEntryRow(title="Bearer Token (Optional)")
         else:
-            self._return_bearer_token_row = Adw.EntryRow(title="Bearer Token")
+            self._return_bearer_token_row = Adw.EntryRow(title="Bearer Token (Optional)")
+        self._return_bearer_token_row.set_tooltip_text(
+            "Only enter a token when the selected return endpoint requires Bearer authentication."
+        )
         self._return_bearer_token_row.connect("notify::text", lambda *_: self._update_flash_button_state())
         self._return_delivery_group.add(self._return_bearer_token_row)
         self._return_delivery_group.set_visible(False)
@@ -464,6 +494,7 @@ class SparkWindow(Adw.ApplicationWindow):
         idx = self._source_row.get_selected()
         if idx == Gtk.INVALID_LIST_POSITION or idx >= len(self.all_sources):
             self.current_source = None
+            self._source_row.set_subtitle("")
             self._plugin_entries = []
             self.selected_sparkplugs = []
             self._pause_background_download("Source cleared")
@@ -482,6 +513,7 @@ class SparkWindow(Adw.ApplicationWindow):
                 self._background_download = BackgroundDownloadState()
 
         self.current_source = new_source
+        self._source_row.set_subtitle(f"Installer image: {new_source.url}")
         self._rebuild_sparkplug_rows()
         self._refresh_selected_sparkplugs()
         self._update_download_status_ui()
@@ -1005,14 +1037,16 @@ class SparkWindow(Adw.ApplicationWindow):
                 return
 
             plugin, phase_pending = pending[index]
+            approval_items = list(phase_pending.commands)
+            approval_items.extend(item["display"] for item in phase_pending.builders)
             self._prompt_runtime_approval_async(
                 plugin_label=getattr(plugin, 'name', 'plugin'),
                 phase_name=phase_pending.phase_name,
-                commands=phase_pending.commands,
+                commands=approval_items,
                 callback=lambda approved: self._on_preflight_prompt_result(
                     approved=approved,
                     plugin=plugin,
-                    commands=phase_pending.commands,
+                    pending=phase_pending,
                     next_prompt=lambda: prompt_next(index + 1),
                     phase_name=phase_pending.phase_name,
                 ),
@@ -1025,7 +1059,7 @@ class SparkWindow(Adw.ApplicationWindow):
         *,
         approved: bool,
         plugin: Any,
-        commands: List[str],
+        pending: Any,
         next_prompt: Callable[[], None],
         phase_name: str,
     ) -> None:
@@ -1034,7 +1068,7 @@ class SparkWindow(Adw.ApplicationWindow):
             return
 
         try:
-            plugin.approve_runtime_commands(commands)
+            plugin.approve_runtime_phase(pending)
         except Exception as exc:
             self._on_error(f"Plugin processing failed: {exc}")
             return
@@ -1127,6 +1161,13 @@ class SparkWindow(Adw.ApplicationWindow):
         if not file_path:
             self._on_error("Download did not produce an image path")
             return
+        self.status_label.set_text("Verifying download...")
+        if self.pipeline:
+            self.pipeline.update_stage(PipelineStage.DOWNLOAD, "Verifying download...", 95)
+        self._verify_downloaded_image_async(file_path, self._on_iso_save_download_verified)
+
+    def _on_iso_save_download_verified(self, source_image: VerifiedImage) -> None:
+        file_path = str(source_image.path)
         logger.info("ISO download complete: %s", file_path)
         self._last_original_iso_path = file_path
         
@@ -1161,9 +1202,8 @@ class SparkWindow(Adw.ApplicationWindow):
                 if new_path:
                     file_path = new_path
 
-            resolved = Path(file_path).expanduser()
-            if not resolved.exists():
-                raise FileNotFoundError(f"Processed ISO missing: {resolved}")
+            verified = verify_image(file_path, provenance="processed-iso", compute_hash=False)
+            resolved = verified.path
             self._last_processed_iso_path = str(resolved)
             
             # Complete PROCESS stage
@@ -1201,7 +1241,8 @@ class SparkWindow(Adw.ApplicationWindow):
         """Copy ISO file to destination in background thread."""
         try:
             import shutil
-            shutil.copy2(source_path, dest_path)
+            verified = verify_image(source_path, provenance="iso-export", compute_hash=False)
+            shutil.copy2(verified.path, dest_path)
             logger.info(f"ISO saved successfully to {dest_path}")
             
             GLib.idle_add(self._on_iso_save_complete, dest_path)
@@ -1248,6 +1289,39 @@ class SparkWindow(Adw.ApplicationWindow):
         if not file_path:
             self._on_error("Download did not produce an image path")
             return
+        self.status_label.set_text("Verifying download...")
+        if self.pipeline:
+            self.pipeline.update_stage(PipelineStage.DOWNLOAD, "Verifying download...", 95)
+        self._verify_downloaded_image_async(file_path, self._on_download_verified)
+
+    def _verify_downloaded_image_async(self, file_path: str, on_success: Callable[[VerifiedImage], None]) -> None:
+        threading.Thread(
+            target=self._verify_downloaded_image_thread,
+            args=(file_path, on_success),
+            daemon=True,
+        ).start()
+
+    def _verify_downloaded_image_thread(
+        self,
+        file_path: str,
+        on_success: Callable[[VerifiedImage], None],
+    ) -> None:
+        try:
+            manifest_hash = self.current_source.sha256 if self.current_source else None
+            source_image = verify_image(
+                file_path,
+                expected_sha256=manifest_hash,
+                provenance=f"source:{self.current_source.id if self.current_source else 'unknown'}",
+                compute_hash=manifest_hash is not None,  # Only hash if manifest specified verification target
+            )
+        except Exception as exc:
+            GLib.idle_add(self._on_error, str(exc))
+            return
+
+        GLib.idle_add(on_success, source_image)
+
+    def _on_download_verified(self, source_image: VerifiedImage) -> None:
+        file_path = str(source_image.path)
         logger.info("Download complete: %s", file_path)
         self._last_original_iso_path = file_path
         
@@ -1267,7 +1341,7 @@ class SparkWindow(Adw.ApplicationWindow):
             ).start()
         else:
             # Skip processing, go straight to write
-            GLib.idle_add(self._start_write_process, file_path)
+            GLib.idle_add(self._start_write_process, source_image)
 
     def _process_iso_in_thread(self, file_path):
         try:
@@ -1282,9 +1356,8 @@ class SparkWindow(Adw.ApplicationWindow):
                 if new_path:
                     file_path = new_path
 
-            resolved = Path(file_path).expanduser()
-            if not resolved.exists():
-                raise FileNotFoundError(f"Processed ISO missing: {resolved}")
+            verified = verify_image(file_path, provenance="processed-iso", compute_hash=False)
+            resolved = verified.path
             self._last_processed_iso_path = str(resolved)
             
             # Complete PROCESS stage
@@ -1293,17 +1366,21 @@ class SparkWindow(Adw.ApplicationWindow):
                     lambda: self.pipeline.complete_stage(PipelineStage.PROCESS) if self.pipeline else None
                 )
             
-            GLib.idle_add(self._start_write_process, str(resolved))
+            GLib.idle_add(self._start_write_process, verified)
             
         except Exception as e:
             logger.exception("Error processing ISO")
             self._on_error(f"Plugin processing failed: {e}")
 
-    def _start_write_process(self, file_path):
-        iso_path = Path(file_path).expanduser()
-        if not iso_path.exists():
-            logger.error("Downloaded ISO missing: %s", iso_path)
-            self._on_error(f"Downloaded ISO missing: {iso_path}")
+    def _start_write_process(self, image_or_path):
+        try:
+            if isinstance(image_or_path, VerifiedImage):
+                image = image_or_path
+            else:
+                image = verify_image(image_or_path, provenance="pre-write", compute_hash=False)
+        except Exception as exc:
+            logger.error("Downloaded ISO cannot be verified: %s", exc)
+            self._on_error(str(exc))
             return
 
         self.status_label.set_text("Writing to USB...")
@@ -1323,21 +1400,20 @@ class SparkWindow(Adw.ApplicationWindow):
         # Start write thread
         threading.Thread(
             target=self._write_thread_func, 
-            args=(iso_path, device_path),
+            args=(image, device_path),
             daemon=True,
         ).start()
 
-    def _write_thread_func(self, iso_path, device_path):
+    def _write_thread_func(self, image, device_path):
         try:
-            iso_path = Path(iso_path)
             def progress_cb(bytes_written, total_bytes):
                 if total_bytes > 0:
                     fraction = bytes_written / total_bytes
                     GLib.idle_add(self._update_write_progress, fraction)
 
-            logger.info(f"Starting write of {iso_path} to {device_path}")
+            logger.info("Starting verified write of %s to %s", image.path, device_path)
             write_iso_to_device(
-                iso_path, 
+                image,
                 device_path, 
                 progress_callback=progress_cb
             )
@@ -1441,10 +1517,10 @@ class SparkWindow(Adw.ApplicationWindow):
                         f"Runtime approval canceled by user for phase '{phase_name}'."
                     ) from approval_error
 
-                if not hasattr(plugin, 'approve_runtime_commands'):
+                if not hasattr(plugin, 'approve_runtime_phase'):
                     raise RuntimeError("Selected plugin cannot persist runtime approvals")
 
-                plugin.approve_runtime_commands(approval_error.pending.commands)
+                plugin.approve_runtime_phase(approval_error.pending)
                 retries += 1
 
     def _prompt_runtime_approval(self, approval_error: RuntimeApprovalRequiredError) -> bool:
@@ -1452,7 +1528,9 @@ class SparkWindow(Adw.ApplicationWindow):
         response: Dict[str, bool] = {"approved": False}
         done = threading.Event()
 
-        command_lines = "\n".join(f"  - {command}" for command in approval_error.pending.commands)
+        approval_items = list(approval_error.pending.commands)
+        approval_items.extend(item["display"] for item in approval_error.pending.builders)
+        command_lines = "\n".join(f"  - {item}" for item in approval_items)
         plugin_label = approval_error.plugin_id or "plugin"
         message = (
             f"Plugin: {plugin_label}\n"
@@ -1465,7 +1543,7 @@ class SparkWindow(Adw.ApplicationWindow):
         self._prompt_runtime_approval_async(
             plugin_label=plugin_label,
             phase_name=approval_error.pending.phase_name,
-            commands=approval_error.pending.commands,
+            commands=approval_items,
             callback=lambda approved: (response.__setitem__("approved", approved), done.set()),
         )
         done.wait()
@@ -1892,15 +1970,14 @@ class SparkWindow(Adw.ApplicationWindow):
         frame_inner.set_margin_start(8)
         frame_inner.set_margin_end(8)
         
-        secret_label = Gtk.Label(label="•" * len(value))
+        secret_label = Gtk.Label(label="*" * len(value))
         secret_label.set_selectable(True)
         secret_label.set_wrap(True)
         secret_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
         secret_label.set_max_width_chars(48)
-        
-        # Store the actual value and visibility state in the label's data
-        secret_label.set_data("secret_value", value)
-        secret_label.set_data("is_visible", False)
+
+        # Track visibility with Python state; GTK data APIs are unsupported here.
+        is_visible = False
         
         frame_inner.append(secret_label)
         frame.set_child(frame_inner)
@@ -1911,15 +1988,14 @@ class SparkWindow(Adw.ApplicationWindow):
         
         # Toggle visibility button
         def toggle_visibility(*args):
-            is_visible = secret_label.get_data("is_visible")
+            nonlocal is_visible
             is_visible = not is_visible
-            secret_label.set_data("is_visible", is_visible)
-            
+
             if is_visible:
                 secret_label.set_label(value)
                 toggle_btn.set_label("Hide")
             else:
-                secret_label.set_label("•" * len(value))
+                secret_label.set_label("*" * len(value))
                 toggle_btn.set_label("Show")
         
         toggle_btn = Gtk.Button(label="Show")

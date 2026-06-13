@@ -1,4 +1,4 @@
-"""ISO manipulation utilities.
+"""SparkWriter-owned ISO manipulation utilities.
 
 Provides functions for extracting, modifying, and repacking ISO images.
 Uses xorriso for compatibility and maintains bootability.

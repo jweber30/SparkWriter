@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class PendingPhaseApproval:
     phase_name: str
-    commands: list[str]
+    commands: list[str] = field(default_factory=list)
+    builders: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -36,7 +37,9 @@ class RuntimeApprovalRequiredError(RuntimeError):
     def __init__(self, plugin_id: str, pending: PendingPhaseApproval):
         self.plugin_id = plugin_id
         self.pending = pending
-        command_list = ", ".join(pending.commands)
+        items = list(pending.commands)
+        items.extend(item["display"] for item in pending.builders)
+        command_list = ", ".join(items)
         super().__init__(
             "Runtime approval required before executing plugin commands. "
             f"Phase '{pending.phase_name}' needs approval for: {command_list}. "

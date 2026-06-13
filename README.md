@@ -22,7 +22,8 @@ SparkWriter is a **modular USB provisioning tool** for bare-metal infrastructure
 2. Generates dynamic forms based on manifest `config_fields` to collect user input
 3. Renders templates using the collected data
 4. Executes lifecycle actions (before/after write)
-5. Writes ISOs to removable devices using `dd` (with Crostini support)
+5. Runs approved OCI builders when installer media needs transformation
+6. Writes checksum-verified images to removable devices using `dd` (with Crostini support)
 
 **In one sentence:** A fancy wrapper around `dd` that lets you define provisioning workflows in JSON.
 
@@ -42,7 +43,7 @@ External authors should use `docs/SPARKWRITER_MANIFEST_AUTHORING.md` for the cur
 ### Publisher Quickstart (2 Minutes)
 
 1. Create `my-plugin.json` with:
-    - `version: "1.5"`
+    - `version: "1.6"`
     - `metadata.id`, `metadata.name`
     - `requires` (use `"commands": []` if you want to be explicit that no external commands are needed)
 2. Add one top-level `source` and optional `outputs`.
@@ -188,7 +189,8 @@ For exact approval file shape and phase behavior, use `docs/SPARKWRITER_MANIFEST
 |-------|-----------|---------|
 | UI | `src/spark_writer/` (GTK4/Adwaita) | Plugin discovery, form generation, download progress, device selection |
 | Plugin Runtime | `src/spark_writer/plugins/` | `JsonSparkPlug` execution, template rendering, action lifecycle |
-| Core Writers | `src/usb_writer_core/` | Low-level disk operations, Crostini support, notifications, session receipts |
+| Builders | `src/spark_writer/builders/` | Hardened OCI builder execution and result validation |
+| Core Writers | `src/usb_writer_core/` | Verified block-image writes, Crostini support, notifications, session receipts |
 | CLI/IPC | System `.desktop` file | URI handler registration, app activation, CLI argument parsing |
 
 **Data Flow:**
@@ -208,9 +210,11 @@ ConfigFormBuilder renders config_fields as Adwaita widgets
     ↓
 User fills form + selects Source/device
     ↓
-on_iso_ready actions (if any) + on_write_complete actions
+on_iso_ready actions and OCI builders (if any) + on_write_complete actions
     ↓
-usb_writer_core.writer uses dd, wipefs, mount via subprocess
+SparkWriter verifies SHA-256 and constructs VerifiedImage
+    ↓
+usb_writer_core.writer rechecks the opened file descriptor, then uses dd
 ```
 
 ### System Dependencies
@@ -222,6 +226,17 @@ SparkWriter requires system packages (not pip):
 - `libtorrent-rasterbar-dev` (torrent/magnet downloads)
 - `util-linux` (lsblk, wipefs, mount)
 - `python3-gi` (PyGObject bindings)
+- `podman` (preferred) or `docker` for manifests that use OCI builders
+
+To use an APT cache for bundled OCI builder image creation, set:
+
+```bash
+export SPARK_WRITER_APT_PROXY=http://apt-proxy.lan:3142
+```
+
+SparkWriter passes this URL only to the container build. The temporary APT
+proxy configuration is removed from the resulting image. Do not put credentials
+in this URL: OCI build arguments are visible in image history.
 
 On Crostini/debian:
 

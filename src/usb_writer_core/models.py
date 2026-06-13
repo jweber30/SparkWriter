@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Dict, List, Optional
 
 
@@ -40,6 +41,17 @@ class IsoSourceType(str, Enum):
     HTTP = "http"
     TORRENT = "torrent"
     LOCAL = "local"
+
+
+@dataclass(frozen=True)
+class VerifiedImage:
+    """A regular image file whose bytes have a known SHA-256 identity."""
+
+    path: Path
+    sha256: str
+    size_bytes: int
+    media_type: str
+    provenance: str
 
 
 @dataclass(frozen=True)

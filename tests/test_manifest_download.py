@@ -5,12 +5,12 @@ from spark_writer.plugins.manifest_download import parse_downloaded_manifest
 
 def test_parse_downloaded_manifest_accepts_json_with_generic_content_type():
     manifest = parse_downloaded_manifest(
-        b'{"version": "1.4"}',
+        b'{"version": "1.6"}',
         content_type="application/octet-stream",
         final_url="https://example.test/manifest",
     )
 
-    assert manifest == {"version": "1.4"}
+    assert manifest == {"version": "1.6"}
 
 
 def test_parse_downloaded_manifest_reports_html_login_page():

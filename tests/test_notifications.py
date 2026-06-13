@@ -96,3 +96,42 @@ def test_update_persistent_notification(mock_run, notifier):
     cmd2 = args2[0]
     assert "-r" in cmd2
     assert "123" in cmd2
+
+
+@patch("subprocess.run")
+def test_notification_service_unavailable_disables_further_attempts(
+    mock_run, notifier, caplog
+):
+    """A missing notification daemon should produce one useful warning."""
+    mock_run.side_effect = subprocess.CalledProcessError(
+        1,
+        ["notify-send"],
+        stderr=(
+            "GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: "
+            "The name org.freedesktop.Notifications was not provided "
+            "by any .service files"
+        ),
+    )
+    notification = Notification(title="Test", body="Starting")
+
+    notifier.update_persistent_notification("progress", notification)
+    notifier.update_persistent_notification("progress", notification)
+
+    mock_run.assert_called_once()
+    assert "no notification service is registered" in caplog.text
+    assert "org.freedesktop.Notifications" in caplog.text
+
+
+@patch("subprocess.run")
+def test_transient_notification_failure_is_retried(mock_run, notifier, caplog):
+    """Failures not known to be permanent should not disable notifications."""
+    mock_run.side_effect = subprocess.CalledProcessError(
+        1, ["notify-send"], stderr="Temporary D-Bus failure"
+    )
+    notification = Notification(title="Test", body="Starting")
+
+    notifier.send_notification(notification)
+    notifier.send_notification(notification)
+
+    assert mock_run.call_count == 2
+    assert "Temporary D-Bus failure" in caplog.text

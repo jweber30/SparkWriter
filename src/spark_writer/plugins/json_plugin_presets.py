@@ -25,6 +25,15 @@ class JsonPluginPresetMixin:
         metadata = self.manifest.get('metadata', {})
         return str(metadata.get('id') or metadata.get('name') or '').strip()
 
+    def _plugin_source_metadata(self) -> Dict[str, str]:
+        metadata = self.manifest.get('metadata', {})
+        if not isinstance(metadata, dict):
+            return {}
+        return {
+            'sparkplug_name': str(metadata.get('name') or '').strip(),
+            'manifest_origin': str(metadata.get('installed_from') or '').strip(),
+        }
+
     def register_sources(self) -> list[Dict[str, Any]]:
         """Return manifest-owned installation Sources.
 
@@ -35,11 +44,13 @@ class JsonPluginPresetMixin:
         sources: list[Dict[str, Any]] = []
         outputs = self._manifest_outputs()
         owner_id = self._plugin_id_for_source()
+        source_metadata = self._plugin_source_metadata()
 
         source = self.manifest.get('source')
         if isinstance(source, dict) and source.get('id'):
             normalized = dict(source)
             normalized.setdefault('sparkplug_id', owner_id)
+            normalized.update({key: value for key, value in source_metadata.items() if value})
             normalized.setdefault('outputs', outputs)
             sources.append(normalized)
             return sources
@@ -55,6 +66,7 @@ class JsonPluginPresetMixin:
                 'capabilities': preset.get('capabilities', []),
                 'sparkplug_id': owner_id,
                 'outputs': outputs,
+                **{key: value for key, value in source_metadata.items() if value},
             }
             if preset.get('version'):
                 normalized['version'] = preset['version']

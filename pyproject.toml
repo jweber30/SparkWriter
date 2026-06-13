@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "spark-writer"
-version = "0.1.22"
+version = "0.1.45"
 description = "GTK4 frontend for Spark Writer"
 authors = [{name = "J. Weber", email = "weber.jesse@gmail.com"}]
 dependencies = [
@@ -22,4 +22,10 @@ spark-writer = "spark_writer.entrypoint:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-spark_writer = ["plugins/installed/*.json", "plugins/installed/*.sh", "plugins/schema/*.json"]
+spark_writer = [
+    "plugins/installed/*.json",
+    "plugins/installed/*.sh",
+    "plugins/schema/*.json",
+    "builders/proxmox/Containerfile",
+    "builders/proxmox/*.py",
+]

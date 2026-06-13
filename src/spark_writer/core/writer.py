@@ -2,6 +2,7 @@ import threading
 import logging
 from pathlib import Path
 from gi.repository import GLib
+from usb_writer_core.models import VerifiedImage
 
 try:
     from usb_writer_core import writer
@@ -19,13 +20,13 @@ class USBWriter:
         self.completion_callback = None
         self.error_callback = None
 
-    def write_iso(self, iso_path, device_path, on_progress=None, on_complete=None, on_error=None):
+    def write_iso(self, image: VerifiedImage, device_path, on_progress=None, on_complete=None, on_error=None):
         self.progress_callback = on_progress
         self.completion_callback = on_complete
         self.error_callback = on_error
         self.is_writing = True
 
-        thread = threading.Thread(target=self._write_task, args=(iso_path, device_path))
+        thread = threading.Thread(target=self._write_task, args=(image, device_path))
         thread.daemon = True
         thread.start()
 
@@ -44,7 +45,7 @@ class USBWriter:
         if self.completion_callback:
             GLib.idle_add(self.completion_callback)
 
-    def _write_task(self, iso_path, device_path):
+    def _write_task(self, image, device_path):
         try:
             self._emit_progress(0, 0, "Wiping device...")
             
@@ -56,7 +57,7 @@ class USBWriter:
                 percent = (written / total) * 100
                 self._emit_progress(percent, 0, f"Writing: {int(percent)}%")
 
-            writer.write_iso_to_device(Path(iso_path), device_path, progress_callback=progress_handler)
+            writer.write_iso_to_device(image, device_path, progress_callback=progress_handler)
             
             self._emit_progress(100, 0, "Complete")
             

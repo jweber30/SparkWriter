@@ -10,8 +10,8 @@ from typing import Any
 from jsonschema import Draft7Validator, FormatChecker
 
 
-LOCKED_SCHEMA_VERSION = "1.5"
-SUPPORTED_SCHEMA_VERSIONS = ("1.4", LOCKED_SCHEMA_VERSION)
+LOCKED_SCHEMA_VERSION = "1.6"
+SUPPORTED_SCHEMA_VERSIONS = (LOCKED_SCHEMA_VERSION,)
 SCHEMA_PATH = Path(__file__).with_name("schema") / "sparkplug_manifest.schema.json"
 
 

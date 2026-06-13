@@ -1,5 +1,6 @@
 import sys
 import os
+import json
 import shutil
 import tempfile
 import gi
@@ -10,7 +11,7 @@ if 'GDK_BACKEND' not in os.environ:
 
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Adw, Gio, GLib, Gdk
+from gi.repository import Gtk, Adw, Gio, GLib, Gdk, Pango
 
 from .window import SparkWindow
 from .plugins.signing import (
@@ -24,6 +25,7 @@ from .plugins.manifest_assets import discover_template_sidecars, resolve_sidecar
 from .plugins.manifest_download import parse_downloaded_manifest
 from .plugins.manifest_schema import validate_manifest_schema
 from .plugins.trust import evaluate_trust
+from .plugins.plugin_install import create_plugin_stage_dir, record_install_origin
 
 class SparkApplication(Adw.Application):
     def __init__(self):
@@ -176,6 +178,8 @@ class SparkApplication(Adw.Application):
             
             if not plugin_id:
                 raise ValueError("Manifest missing metadata.id field")
+
+            record_install_origin(manifest, normalized_url)
             
             # Step 5: Check required commands
             required_cmds = manifest.get('requires', {}).get('commands', [])
@@ -413,9 +417,14 @@ class SparkApplication(Adw.Application):
             dst_dir = os.path.join(data_home, "spark-writer", "plugins")
             os.makedirs(dst_dir, exist_ok=True)
 
-            stage_dir = tempfile.mkdtemp(prefix=f"spark-plugin-{plugin_id}-")
+            # Keep staging on the destination filesystem so os.replace remains
+            # atomic even when /tmp and XDG_DATA_HOME are separate mounts.
+            stage_dir = create_plugin_stage_dir(dst_dir, plugin_id)
             stage_manifest = os.path.join(stage_dir, f"{plugin_id}.json")
             shutil.move(tmp_path, stage_manifest)
+            with open(stage_manifest, "w", encoding="utf-8") as handle:
+                json.dump(manifest, handle, indent=2)
+                handle.write("\n")
 
             for rel_path, temp_file in downloaded_sidecars:
                 target = os.path.join(stage_dir, rel_path)
@@ -443,7 +452,11 @@ class SparkApplication(Adw.Application):
             # Reload plugins
             win = self.props.active_window
             if win:
-                GLib.idle_add(win.reload_plugins, f"Installed {plugin_name}")
+                GLib.idle_add(
+                    win.reload_plugins,
+                    f"Installed {plugin_name}",
+                    plugin_id,
+                )
                 
         except Exception as e:
             print(f"Failed to finalize plugin installation: {e}")
@@ -475,23 +488,51 @@ class SparkApplication(Adw.Application):
         GLib.idle_add(show)
     
     def _show_error_dialog(self, title: str, message: str):
-        """Show an error dialog to the user."""
+        """Show an error dialog with selectable, copyable details."""
         print(f"ERROR - {title}: {message}")
         
         def show():
             win = self.props.active_window
-            # If no window is active yet, we can't easily show a modal dialog attached to it.
-            # But we can try to get the active window or just show a detached one (less ideal).
-            
-            dialog = Gtk.MessageDialog(
+
+            dialog = Gtk.Dialog(
                 transient_for=win,
                 modal=True,
-                message_type=Gtk.MessageType.ERROR,
-                buttons=Gtk.ButtonsType.OK,
-                text=title,
+                title=title,
             )
-            dialog.props.secondary_text = message
-            dialog.connect("response", lambda d, r: d.destroy())
+            dialog.set_default_size(520, -1)
+            dialog.add_button("Copy Details", Gtk.ResponseType.APPLY)
+            dialog.add_button("Close", Gtk.ResponseType.CLOSE)
+
+            content = dialog.get_content_area()
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+            box.set_margin_top(18)
+            box.set_margin_bottom(18)
+            box.set_margin_start(18)
+            box.set_margin_end(18)
+
+            heading = Gtk.Label(label=title)
+            heading.add_css_class("title-2")
+            heading.set_xalign(0)
+            box.append(heading)
+
+            details = Gtk.Label(label=message)
+            details.set_selectable(True)
+            details.set_wrap(True)
+            details.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            details.set_xalign(0)
+            details.set_max_width_chars(80)
+            box.append(details)
+            content.append(box)
+
+            def on_response(current_dialog, response):
+                if response == Gtk.ResponseType.APPLY:
+                    display = Gdk.Display.get_default()
+                    if display:
+                        display.get_clipboard().set(message)
+                    return
+                current_dialog.destroy()
+
+            dialog.connect("response", on_response)
             dialog.present()
             
         GLib.idle_add(show)

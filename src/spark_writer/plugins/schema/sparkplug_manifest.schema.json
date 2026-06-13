@@ -9,7 +9,7 @@
     "version": {
       "type": "string",
       "description": "Manifest schema version",
-      "enum": ["1.4", "1.5"]
+      "enum": ["1.6"]
     },
     "metadata": {
       "type": "object",
@@ -133,7 +133,7 @@
     },
     "return_delivery": {
       "type": "object",
-      "description": "Post-write secure-context delivery contract for secrets and receipt context. Introduced in manifest version 1.4 and available in supported manifest versions.",
+      "description": "Post-write secure-context delivery contract for secrets and receipt context in manifest version 1.6.",
       "properties": {
         "enabled": {
           "type": "boolean",
@@ -488,13 +488,13 @@
             "compute_file_hash",
             "create_partition",
             "write_partition_files",
-            "generate_receipt",
             "format_yaml_list",
             "generate_ephemeral_password",
             "store_ephemeral_secret",
             "show_ephemeral_secret_button",
             "create_artifact",
-            "prepare_installer_iso"
+            "prepare_installer_iso",
+            "run_builder"
           ],
           "description": "Action type"
         },
@@ -556,6 +556,26 @@
         "installer_scheme": {
           "type": "string",
           "description": "Installer preparation scheme for prepare_installer_iso"
+        },
+        "builder_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$",
+          "description": "Builder protocol identifier for run_builder"
+        },
+        "image": {
+          "type": "string",
+          "minLength": 1,
+          "description": "OCI image reference for run_builder"
+        },
+        "source_path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Source image path passed read-only to run_builder"
+        },
+        "network": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow network access while the builder runs"
         },
         "output_path": {
           "type": "string",

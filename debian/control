@@ -9,6 +9,7 @@ X-Python3-Version: >= 3.10
 Package: spark-writer
 Architecture: all
 Depends: ${python3:Depends}, ${misc:Depends}, python3-gi, gir1.2-gtk-4.0, gir1.2-adw-1, python3-requests, python3-nacl, libnotify-bin
+Recommends: podman | docker.io
 Replaces: spark-gtk (<< 0.2.0)
 Breaks: spark-gtk (<< 0.2.0)
 Provides: spark-gtk

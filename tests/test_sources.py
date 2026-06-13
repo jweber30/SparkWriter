@@ -63,7 +63,7 @@ def test_source_catalog_defaults_to_packaged_installed_directory():
 
 def test_plugin_manager_collects_manifest_owned_sources(tmp_path):
     manifest = {
-        "version": "1.4",
+        "version": "1.6",
         "metadata": {"id": "ubuntu-autoinstall", "name": "Ubuntu Autoinstall"},
         "requires": {"commands": []},
         "source": {
@@ -95,13 +95,13 @@ def _write_plugin(tmp_path: Path, plugin_id: str, manifest: dict) -> JsonSparkPl
 
 def test_plugin_manager_filters_plugins_by_source_compatibility(tmp_path):
     ubuntu_manifest = {
-        "version": "1.4",
+        "version": "1.6",
         "metadata": {"id": "ubuntu-only", "name": "Ubuntu Only"},
         "requires": {"commands": []},
         "ui_visibility": {"when": {"source_family": ["ubuntu"]}},
     }
     proxmox_manifest = {
-        "version": "1.4",
+        "version": "1.6",
         "metadata": {"id": "proxmox-only", "name": "Proxmox Only"},
         "requires": {"commands": []},
         "ui_visibility": {"when": {"source_id": ["proxmox-ve-9.1"]}},
@@ -126,7 +126,7 @@ def test_plugin_manager_filters_plugins_by_source_compatibility(tmp_path):
 
 def test_plugin_manager_uses_manifest_source_owner(tmp_path):
     owner_manifest = {
-        "version": "1.4",
+        "version": "1.6",
         "metadata": {"id": "owner", "name": "Owner"},
         "requires": {"commands": []},
         "source": {
@@ -137,7 +137,7 @@ def test_plugin_manager_uses_manifest_source_owner(tmp_path):
         },
     }
     broad_manifest = {
-        "version": "1.4",
+        "version": "1.6",
         "metadata": {"id": "broad", "name": "Broad"},
         "requires": {"commands": []},
         "ui_visibility": {"when": {"source_family": ["ubuntu"]}},
@@ -157,7 +157,7 @@ def test_plugin_manager_uses_manifest_source_owner(tmp_path):
 
 def test_plugin_manager_detects_conflicting_selection(tmp_path):
     first_manifest = {
-        "version": "1.4",
+        "version": "1.6",
         "metadata": {"id": "first", "name": "First"},
         "requires": {"commands": []},
         "config_fields": [{"id": "hostname", "label": "Hostname", "type": "text"}],
@@ -174,7 +174,7 @@ def test_plugin_manager_detects_conflicting_selection(tmp_path):
         },
     }
     second_manifest = {
-        "version": "1.4",
+        "version": "1.6",
         "metadata": {"id": "second", "name": "Second"},
         "requires": {"commands": []},
         "config_fields": [{"id": "hostname", "label": "Hostname", "type": "text"}],
@@ -191,7 +191,7 @@ def test_plugin_manager_detects_conflicting_selection(tmp_path):
 
 def test_json_plugin_exposes_manifest_wizard_pages(tmp_path):
     manifest = {
-        "version": "1.4",
+        "version": "1.6",
         "metadata": {"id": "wizard-demo", "name": "Wizard Demo"},
         "requires": {"commands": []},
         "config_fields": [
@@ -216,7 +216,7 @@ def test_json_plugin_exposes_manifest_wizard_pages(tmp_path):
 
 def test_json_plugin_rejects_unknown_wizard_field(tmp_path):
     manifest = {
-        "version": "1.4",
+        "version": "1.6",
         "metadata": {"id": "bad-wizard", "name": "Bad Wizard"},
         "requires": {"commands": []},
         "config_fields": [
@@ -241,7 +241,7 @@ def test_json_plugin_rejects_unknown_wizard_field(tmp_path):
 
 def test_json_plugin_accepts_new_manifest_version_with_return_delivery(tmp_path):
     manifest = {
-        "version": "1.4",
+        "version": "1.6",
         "metadata": {"id": "delivery-demo", "name": "Delivery Demo"},
         "requires": {"commands": []},
         "return_delivery": {
@@ -268,7 +268,7 @@ def test_json_plugin_accepts_new_manifest_version_with_return_delivery(tmp_path)
 
 def test_json_plugin_accepts_current_manifest_version_with_torrent_artifact(tmp_path):
     manifest = {
-        "version": "1.5",
+        "version": "1.6",
         "metadata": {"id": "current-version", "name": "Current Version"},
         "requires": {"commands": []},
         "source": {
@@ -290,6 +290,34 @@ def test_json_plugin_accepts_current_manifest_version_with_torrent_artifact(tmp_
     source = Source.from_dict(plugin.register_sources()[0])
     assert source.acquire_kind == "torrent"
     assert source.acquire_artifact == "current.iso"
+
+
+def test_manifest_source_includes_installed_manifest_identity(tmp_path):
+    manifest = {
+        "version": "1.6",
+        "metadata": {
+            "id": "metalstrapper-demo",
+            "name": "MetalStrapper Demo",
+            "installed_from": "https://metalstrapper.example/api/manifests/demo",
+        },
+        "requires": {"commands": []},
+        "source": {
+            "id": "proxmox-demo",
+            "name": "Proxmox VE",
+            "family": "proxmox",
+            "url": "https://example.com/proxmox.iso",
+        },
+    }
+
+    plugin = _write_plugin(tmp_path, "metalstrapper-demo", manifest)
+    source = Source.from_dict(plugin.register_sources()[0])
+
+    assert source.sparkplug_id == "metalstrapper-demo"
+    assert source.sparkplug_name == "MetalStrapper Demo"
+    assert source.manifest_origin == "https://metalstrapper.example/api/manifests/demo"
+    assert source.display_label == (
+        "MetalStrapper Demo - https://metalstrapper.example/api/manifests/demo"
+    )
 
 
 def test_json_plugin_rejects_legacy_manifest_version(tmp_path):
@@ -318,12 +346,12 @@ def test_json_plugin_rejects_future_manifest_version_with_supported_versions(tmp
     assert not plugin.is_available
     reason = plugin.unavailable_reason or ""
     assert "Unsupported manifest version: 9.9" in reason
-    assert "1.4" in reason
+    assert "1.6" in reason
 
 
 def test_json_plugin_rejects_non_https_return_endpoint(tmp_path):
     manifest = {
-        "version": "1.4",
+        "version": "1.6",
         "metadata": {"id": "bad-endpoint", "name": "Bad Endpoint"},
         "requires": {"commands": []},
         "return_delivery": {
@@ -347,7 +375,7 @@ def test_json_plugin_rejects_non_https_return_endpoint(tmp_path):
 
 def test_json_plugin_accepts_localhost_http_return_endpoint(tmp_path):
     manifest = {
-        "version": "1.4",
+        "version": "1.6",
         "metadata": {"id": "local-endpoint", "name": "Local Endpoint"},
         "requires": {"commands": []},
         "return_delivery": {
@@ -394,7 +422,7 @@ def test_receipt_builder_emits_source_and_sparkplugs(tmp_path):
     iso_path.write_bytes(b"hello")
 
     manifest = {
-        "version": "1.4",
+        "version": "1.6",
         "metadata": {"id": "ubuntu-autoinstall", "name": "Ubuntu Autoinstall", "version": "1.0.0"},
         "requires": {"commands": []},
     }

@@ -1,5 +1,5 @@
 {
-  "version": "1.4",
+  "version": "1.6",
   "metadata": {
     "id": "proxmox-tailscale",
     "name": "Proxmox Tailscale",
@@ -8,15 +8,7 @@
     "description": "Prepare a Proxmox VE auto-install ISO with Tailscale first-boot provisioning."
   },
   "requires": {
-    "commands": [
-      {
-        "name": "proxmox-auto-install-assistant",
-        "package": "proxmox-auto-install-assistant",
-        "description": "Prepare Proxmox VE installer ISOs with an answer file and first-boot script",
-        "install_hint": "Install proxmox-auto-install-assistant from Proxmox VE tooling",
-        "allow_plugin_specific": true
-      }
-    ]
+    "commands": []
   },
   "source": {
     "id": "proxmox-ve-9.1-tailscale",
@@ -306,15 +298,15 @@
       },
       {
         "id": "inject_into_iso",
-        "type": "prepare_installer_iso",
-        "installer_scheme": "proxmox-auto-install",
-        "iso_path": "{{iso_path}}",
-        "output_path": "{{iso_path}}",
+        "type": "run_builder",
+        "builder_id": "proxmox-auto-install",
+        "image": "spark-writer/proxmox-auto-install:trixie-v2",
+        "source_path": "{{iso_path}}",
         "artifact_map": {
           "answer-file": "answer_toml",
           "first-boot": "firstboot_script"
         },
-        "sudo": true,
+        "network": false,
         "emit_event": {
           "message": "Preparing Proxmox auto-install ISO",
           "progress": 90

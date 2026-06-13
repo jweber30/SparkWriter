@@ -36,6 +36,7 @@ class DesktopNotifier:
         self.app_name = app_name
         self.icon_path = icon_path
         self._persistent_notifications: Dict[str, int] = {}  # Maps notification_id to dbus notification id
+        self._notifications_available = True
 
     def _wrap_command_for_user(self, cmd: list[str]) -> list[str]:
         """
@@ -70,6 +71,9 @@ class DesktopNotifier:
 
     def send_notification(self, notification: Notification) -> Optional[int]:
         """Send a simple desktop notification and returns the notification ID."""
+        if not self._notifications_available:
+            return None
+
         cmd = [
             "notify-send",
             "-a", self.app_name,
@@ -86,21 +90,16 @@ class DesktopNotifier:
         
         cmd = self._wrap_command_for_user(cmd)
 
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            if result.stdout.strip().isdigit():
-                return int(result.stdout.strip())
-        except FileNotFoundError as e:
-            # notify-send not installed or not found
-            self.logger.error("notify-send not found: %s", e)
-        except subprocess.CalledProcessError as e:
-            # notify-send returned non-zero
-            self.logger.error("notify-send failed: %s", e)
-            self.logger.debug("notify-send stderr: %s", e.stderr)
+        result = self._run_notify_send(cmd)
+        if result and result.stdout.strip().isdigit():
+            return int(result.stdout.strip())
         return None
 
     def update_persistent_notification(self, notification_id: str, notification: Notification):
         """Create or update a persistent notification."""
+        if not self._notifications_available:
+            return
+
         replaces_id = self._persistent_notifications.get(notification_id)
 
         cmd = [
@@ -123,16 +122,44 @@ class DesktopNotifier:
         
         cmd = self._wrap_command_for_user(cmd)
 
+        result = self._run_notify_send(cmd)
+        if result and result.stdout.strip().isdigit():
+            new_id = int(result.stdout.strip())
+            self._persistent_notifications[notification_id] = new_id
+
+    def _run_notify_send(
+        self, cmd: list[str]
+    ) -> Optional[subprocess.CompletedProcess[str]]:
+        """Run notify-send and handle unavailable desktop notification services."""
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            if result.stdout.strip().isdigit():
-                new_id = int(result.stdout.strip())
-                self._persistent_notifications[notification_id] = new_id
+            return subprocess.run(
+                cmd, capture_output=True, text=True, check=True
+            )
         except FileNotFoundError as e:
-            self.logger.error("notify-send not found: %s", e)
+            self._notifications_available = False
+            self.logger.warning(
+                "Desktop notifications disabled: notify-send was not found: %s", e
+            )
         except subprocess.CalledProcessError as e:
-            self.logger.error("notify-send failed: %s", e)
-            self.logger.debug("notify-send stderr: %s", e.stderr)
+            stderr = (e.stderr or "").strip()
+            service_unavailable = (
+                "org.freedesktop.Notifications" in stderr
+                and (
+                    "ServiceUnknown" in stderr
+                    or "was not provided by any .service files" in stderr
+                )
+            )
+            if service_unavailable:
+                self._notifications_available = False
+                self.logger.warning(
+                    "Desktop notifications disabled: no notification service "
+                    "is registered on the session D-Bus (%s)",
+                    stderr,
+                )
+            else:
+                detail = f": {stderr}" if stderr else ""
+                self.logger.error("notify-send failed%s", detail)
+        return None
 
     def _map_level_to_urgency(self, level: NotificationLevel):
         """Map NotificationLevel to notify-send urgency string."""

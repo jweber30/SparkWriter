@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 class PluginManager:
     _CONFLICTING_HOST_ACTION_TYPES = {
         "prepare_installer_iso",
+        "run_builder",
     }
 
     def __init__(self):
